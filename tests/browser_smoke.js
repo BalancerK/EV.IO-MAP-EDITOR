@@ -195,6 +195,19 @@ async function main() {
     const camAfter = await evaluate(`window.__mapEditor.viewport.camera.position.toArray()`);
     check(Math.hypot(camAfter[0] - camBefore[0], camAfter[2] - camBefore[2]) > 1 && Math.abs(camAfter[1] - camBefore[1]) < 1e-6, `ArrowUp slides the view forward along the ground (${camBefore.map((v) => v.toFixed(1))} -> ${camAfter.map((v) => v.toFixed(1))})`);
 
+    // ---- item 4: Auto nav
+    await press('[data-key="o:Auto nav"]');
+    await sleep(200);
+    check(await evaluate(`document.querySelector('#nav-dialog').open`), 'Auto nav opens the generator dialog');
+    await press('#nav-generate');
+    await sleep(500);
+    d = await doc();
+    const navText = await evaluate(`document.querySelector('#nav-result').innerText`);
+    check(d.navNodes.length > 50 && d.navNodes.some((n) => n.links.length), `Generate fills the map with linked nav nodes (${d.navNodes.length}): ${navText.split(String.fromCharCode(10))[0]}`);
+    check(!d.navNodes.some((n) => d.blocks.some((b) => b.shape === 'box' && b.collision !== 'visual' && Math.abs(n.position.x - b.position.x) < b.size.x / 2 - 0.05 && Math.abs(n.position.z - b.position.z) < b.size.z / 2 - 0.05 && n.position.y > b.position.y - b.size.y / 2 + 0.2 && n.position.y < b.position.y + b.size.y / 2 - 0.05)), 'no generated node is inside a box');
+    await evaluate(`document.querySelector('#nav-dialog').close()`);
+    check((await evaluate(`document.querySelector('#btn-images').textContent`)) === 'Export images', 'the images button reads "Export images"');
+
     await press('#btn-export');
     await sleep(300);
     const exportText = await evaluate(`document.querySelector('#export-body').innerText`);
@@ -210,7 +223,8 @@ async function main() {
     const bytes = Buffer.from(b64, 'base64');
     const m = readEvmap(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length));
     check(m.bytesRead === m.bytesTotal, `browser export re-reads exactly (${bytes.length} bytes)`);
-    check(m.teleporters.length === 2 && m.aiNavNodes.length === 2, 'teleporters and nav nodes exported');
+    const docNow = await doc();
+    check(m.teleporters.length === docNow.teleporters.length && m.aiNavNodes.length === docNow.navNodes.length, `teleporters and nav nodes exported (${m.aiNavNodes.length} nav nodes)`);
     const require = createRequire(import.meta.url);
     const bpw = require(`${serverDir}/physics_world.js`);
     const built = bpw.buildWorldFromEvmapBuffer(bytes, 'smoke');
@@ -262,7 +276,7 @@ async function main() {
     const moveCard = await evaluate(`[...document.querySelectorAll('#inspector .card')].findIndex((c) => c.style.borderColor !== '')`);
     check(moveCard === 0, "Move selects that shot's marker for the gizmo");
 
-    // Upload images: exact sizes and formats, real content (not a blank frame), view switching.
+    // Export images: exact sizes and formats, real content (not a blank frame), view switching.
     await evaluate(`document.querySelector('#export-dialog').close()`);
     await press('#btn-images');
     await sleep(1500);

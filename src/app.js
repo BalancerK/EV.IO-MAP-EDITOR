@@ -4,6 +4,7 @@
 import { Viewport } from './editor/viewport.js';
 import { newDocument, normaliseDocument, newId, validate, COLLISION, TEAMS } from './model/document.js';
 import { compileDocument, generateCameraPaths } from './model/compile.js';
+import { generateNavNodes, navReport } from './model/navgen.js';
 import { buildBlockTriangles, blocksBounds } from './model/geometry.js';
 import { collect, remapIds, translate, rotateY, mirror, insert, replace, removeSelection, centreOf, toClipboardText, fromClipboardText } from './model/edit.js';
 import { writeEvmap } from './evmap/format.js';
@@ -30,6 +31,7 @@ const OBJECT_PIECES = [
     { label: 'Weapon', type: 'weaponSpawns', color: 'var(--weapon)' },
     { label: 'Teleporter', type: 'teleporters', color: 'var(--teleport)' },
     { label: 'Nav node', type: 'navNodes', color: 'var(--nav)' },
+    { label: 'Auto nav', type: 'navAuto', color: 'var(--nav)', instant: true, title: 'Generate bot nav nodes over every walkable floor' },
     { label: 'Camera', type: 'cameraPaths', color: 'var(--camera)', instant: true },
     { label: 'Auto paths', type: 'cameraAuto', color: 'var(--camera)', instant: true, title: 'Generate 6 menu camera paths circling the map' },
     { label: 'BR circle', type: 'brCircle', color: 'var(--teleport)', instant: true },
@@ -413,6 +415,8 @@ function addInstantPiece(p) {
         addCameraPath();
     } else if (p.type === 'cameraAuto') {
         generatePaths();
+    } else if (p.type === 'navAuto') {
+        openNavDialog();
     } else if (p.type === 'brCircle') {
         if (state.doc.brCircle) { select({ kind: 'brCircle', id: 'brCircle' }); return; }
         const xs = state.doc.blocks.map((b) => b.position);
@@ -740,6 +744,14 @@ function renderEnvironment() {
 
 function renderChecklist() {
     const issues = validate(state.doc);
+    if (state.doc.navNodes.length) {
+        const nav = navReport(state.doc);
+        if (nav.unreachableSpawns.length) issues.push({ level: 'warn', text: `Bots cannot reach ${spawnNames(nav.unreachableSpawns)} (no nav node nearby in the main area).` });
+        if (nav.areas > 1) issues.push({ level: 'warn', text: `The nav graph has ${nav.areas} separate areas: bots cannot travel between them.` });
+    } else {
+        const i = issues.findIndex((x) => /nav nodes/.test(x.text));
+        if (i >= 0) issues[i] = { level: 'warn', text: 'No bot nav nodes: bots will stand still. Auto nav (Gameplay) can generate them.' };
+    }
     const errors = issues.filter((i) => i.level === 'error').length;
     const badge = $('#issue-count');
     badge.textContent = issues.length || '';
@@ -827,7 +839,7 @@ function openExport() {
     $('#export-dialog').showModal();
 }
 
-// ------------------------------------------------------------------ upload images
+// ------------------------------------------------------------------ export images
 // ev.io's upload form (ev.io/node/add/map) wants a 166×70 PNG thumbnail and a 2000×902 JPEG large
 // image. Both are rendered from the map itself; the thumbnail is supersampled 4× so it stays crisp.
 const IMAGE_SPECS = {
@@ -882,6 +894,38 @@ function downloadImage(key) {
     download(img.blob, `${slug(state.doc.name)}-${key === 'large' ? 'large' : 'thumbnail'}-${spec.width}x${spec.height}.${spec.ext}`, spec.type);
 }
 
+// ------------------------------------------------------------------ bot nav nodes
+function openNavDialog() {
+    $('#nav-result').textContent = '';
+    $('#nav-replace').checked = true;
+    $('#nav-dialog').showModal();
+}
+function runNavGeneration() {
+    const spacing = parseFloat($('#nav-spacing').value) || 4;
+    const replaceAll = $('#nav-replace').checked;
+    const t0 = performance.now();
+    const { nodes, stats } = generateNavNodes(state.doc, { spacing });
+    const ms = Math.round(performance.now() - t0);
+    const out = $('#nav-result');
+    out.textContent = '';
+    if (!nodes.length) {
+        out.append(el('ul', { class: 'issues' }, el('li', { class: 'error' }, 'No walkable floor found. Add solid blocks to stand on first.')));
+        return;
+    }
+    change((doc) => { doc.navNodes = replaceAll ? nodes : [...doc.navNodes, ...nodes]; });
+    select(null);
+    const report = navReport(state.doc);
+    const items = [el('li', { class: 'ok' }, `${stats.nodes} nodes and ${stats.links} links in ${ms} ms.`)];
+    if (report.areas > 1) items.push(el('li', { class: 'warn' }, `The graph has ${report.areas} separate areas. Bots cannot travel between them; connect them with a ramp or stairs, or delete stray islands.`));
+    if (report.unreachableSpawns.length) items.push(el('li', { class: 'warn' }, `Bots cannot reach ${spawnNames(report.unreachableSpawns)}.`));
+    out.append(el('ul', { class: 'issues' }, ...items));
+    toast(`Generated ${stats.nodes} nav nodes`);
+}
+function spawnNames(indices) {
+    const names = indices.map((i) => itemName('playerSpawns', state.doc.playerSpawns[i], i));
+    return names.length <= 3 ? names.join(', ') : `${names.slice(0, 3).join(', ')} and ${names.length - 3} more`;
+}
+
 // ------------------------------------------------------------------ toast
 let toastTimer;
 function toast(text) {
@@ -931,6 +975,7 @@ function bindUi() {
     $('#btn-redo').addEventListener('click', redo);
     $('#btn-export').addEventListener('click', openExport);
     $('#btn-images').addEventListener('click', openImages);
+    $('#nav-generate').addEventListener('click', runNavGeneration);
     $('#frame-save').addEventListener('click', () => viewport.endFraming(true));
     $('#frame-cancel').addEventListener('click', () => viewport.endFraming(false));
     $('#work-light').addEventListener('change', (e) => viewport.setWorkLight(e.target.checked));

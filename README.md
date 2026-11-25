@@ -22,6 +22,10 @@ server (for example `python -m http.server`) and open `index.html`.
 - **Gameplay objects**: free-for-all and team spawns with facing, weapon spawns, teleporters with
   links (placing one right after another pairs them), bot nav nodes (chained as you place them),
   battle royale circle.
+- **Bot nav nodes, generated**: *Auto nav* fills every walkable floor with nodes and links the ones a
+  bot can walk between (up ramps and stairs, through doorways; never through walls, off ledges or
+  under low ceilings), then reports separate areas and spawns bots cannot reach. The checklist keeps
+  checking that as you edit.
 - **Menu camera paths**: frame each shot by looking through the camera and flying it (right-drag to
   look, WASD/Q/E to move, Enter to save); drag the start and end cameras with the gizmo; preview a
   path or play the whole menu loop; or generate six paths circling the map as a starting point.
@@ -33,7 +37,7 @@ server (for example `python -m http.server`) and open `index.html`.
 - **Checklist**: ev.io's submission checklist, run live (spawns, collision, lights, kill zone at
   y = −30, ...).
 
-- **Upload images**: renders the 166×70 PNG thumbnail and the 2000×902 JPEG large image that
+- **Export images**: renders the 166×70 PNG thumbnail and the 2000×902 JPEG large image that
   ev.io's upload form asks for, from the current view or any menu camera path, without the
   editor's grid and markers.
 
@@ -42,7 +46,7 @@ Projects save as `.mapproject.json` (and autosave in the browser). **Export .evm
 ## Submitting to ev.io
 
 Upload at <https://ev.io/node/add/map> with a 166×70 PNG thumbnail and a 2000×902 JPEG large image
-(the editor's **Upload images** button makes both).
+(the editor's **Export images** button makes both).
 Until ev.io staff approve a map, only its author can play it from custom server.
 
 ## Playing community maps on the custom server
