@@ -13,6 +13,10 @@ server (for example `python -m http.server`) and open `index.html`.
 
 - **Blocks**: box, floor, wall, ramp, stairs, corner wedge, pillar, platform. Snap to a grid, move,
   rotate and resize with the gizmo or by typing numbers.
+- **Fast building**: Shift-click or drag a box to select several pieces, then move or turn them
+  together; copy and paste (Ctrl+C / Ctrl+V, also between maps and tabs); turn 90° with `[` / `]`;
+  *Mirror copy* across the map's centre line (team spawns swap) for symmetrical maps, or flip in
+  place; hide (H) and lock pieces from the scene list. Arrow keys and PgUp/PgDn move the view.
 - **Collision per block**: solid, decoration (visible, no collision) or invisible wall.
 - **Materials**: colour, roughness, opacity, glow.
 - **Gameplay objects**: free-for-all and team spawns with facing, weapon spawns, teleporters with

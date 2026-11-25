@@ -144,11 +144,24 @@ export class Viewport {
         this.selectionBox = new THREE.BoxHelper(undefined, COLORS.select);
         this.selectionBox.visible = false;
         scene.add(this.selectionBox);
+        // Multi-selection: one outline per selected item, and a pivot the gizmo moves the group by.
+        this.selected = [];
+        this.extraBoxes = [];
+        this.pivot = new THREE.Object3D();
+        scene.add(this.pivot);
+        this.groupDrag = null;
+        this.gizmo.addEventListener('objectChange', () => this.applyGroupDrag());
+        this.marqueeEl = document.createElement('div');
+        this.marqueeEl.className = 'marquee';
+        this.marqueeEl.hidden = true;
+        container.appendChild(this.marqueeEl);
+        this.navKeys = new Set();
 
         this.raycaster = new THREE.Raycaster();
         this.pointer = new THREE.Vector2();
         this.bindPointer();
         this.bindFramingInput();
+        this.bindArrowKeys();
         this.resizeObserver = new ResizeObserver(() => this.resize());
         this.resizeObserver.observe(container);
         this.resize();
@@ -171,7 +184,9 @@ export class Viewport {
         if (this.framing) this.stepFraming(dt);
         else if (this.flyover) this.stepFlyover();
         else this.orbit.update();
+        if (!this.framing && !this.flyover) this.stepArrowKeys(dt);
         if (this.selectionBox.visible && this.selectedObject3D()) this.selectionBox.update();
+        for (const b of this.extraBoxes) if (b.visible && b.userData.obj) b.update();
         this.sky.position.copy(this.camera.position);
         this.renderer.render(this.scene, this.camera);
     }
@@ -241,6 +256,8 @@ export class Viewport {
             mesh.position.set(block.position.x, block.position.y, block.position.z);
             mesh.rotation.set(deg(block.rotation.x), deg(block.rotation.y), deg(block.rotation.z), 'XYZ');
             mesh.scale.set(1, 1, 1);
+            mesh.visible = !block.hidden;
+            mesh.userData.locked = !!block.locked;
             mesh.castShadow = block.collision !== COLLISION.INVISIBLE && block.shadows !== false;
             mesh.receiveShadow = block.collision !== COLLISION.INVISIBLE;
         }
@@ -259,6 +276,8 @@ export class Viewport {
                 const part = c.userData.part || (c.parent && c.parent.userData.part);
                 c.userData = part ? { kind, id: item.id, part } : { kind, id: item.id };
             });
+            obj.visible = !item.hidden;
+            if (item.locked) obj.traverse((c) => { c.userData.locked = true; });
             this.objectRoot.add(obj);
             this.objectGroups.set(item.id, obj);
         };
@@ -335,9 +354,19 @@ export class Viewport {
     }
 
     // ------------------------------------------------------------------ selection & gizmo
-    select(sel) {
-        this.selection = sel;
+    select(sel) { this.selectMany(sel ? [sel] : [], sel); }
+    // Several items: the gizmo moves (or turns about the vertical) all of them around their centre.
+    selectMany(list, primary = list[list.length - 1] || null) {
+        this.selected = list.slice();
+        this.selection = primary;
         this.attachGizmo();
+    }
+    objectFor(sel) {
+        if (!sel) return null;
+        if (sel.kind === 'block') return this.blockMeshes.get(sel.id) || null;
+        const group = this.objectGroups.get(sel.id) || null;
+        if (group && sel.kind === 'cameraPaths' && sel.part) return group.children.find((c) => c.userData.part === sel.part) || group;
+        return group;
     }
     selectedObject3D() {
         if (!this.selection) return null;
@@ -349,6 +378,8 @@ export class Viewport {
         return group;
     }
     attachGizmo() {
+        for (const b of this.extraBoxes) { b.visible = false; b.userData.obj = null; }
+        if (this.tool === 'select' && this.selected.length > 1) return this.attachGroupGizmo();
         const obj = this.tool === 'select' ? this.selectedObject3D() : null;
         if (!obj) { this.gizmo.detach(); this.selectionBox.visible = false; return; }
         const kind = this.selection.kind;
@@ -361,8 +392,51 @@ export class Viewport {
         this.selectionBox.setFromObject(obj);
         this.selectionBox.visible = true;
     }
+    attachGroupGizmo() {
+        const objs = this.selected.map((s) => this.objectFor(s)).filter(Boolean);
+        this.selectionBox.visible = false;
+        objs.forEach((obj, i) => {
+            if (!this.extraBoxes[i]) { const b = new THREE.BoxHelper(undefined, COLORS.select); this.scene.add(b); this.extraBoxes[i] = b; }
+            const b = this.extraBoxes[i];
+            b.setFromObject(obj); b.userData.obj = obj; b.visible = true;
+        });
+        if (!objs.length) { this.gizmo.detach(); return; }
+        const centre = new THREE.Vector3();
+        for (const o of objs) centre.add(o.getWorldPosition(new THREE.Vector3()));
+        centre.divideScalar(objs.length);
+        this.pivot.position.copy(centre);
+        this.pivot.rotation.set(0, 0, 0);
+        // A group moves, or turns about the vertical; it is not resized.
+        if (this.gizmo.getMode() === 'scale') this.gizmo.setMode('translate');
+        const turning = this.gizmo.getMode() === 'rotate';
+        this.gizmo.showX = !turning; this.gizmo.showY = true; this.gizmo.showZ = !turning;
+        this.gizmo.attach(this.pivot);
+        this.groupDrag = { objs, start: objs.map((o) => ({ pos: o.position.clone(), quat: o.quaternion.clone() })), pivot: centre.clone() };
+    }
+    applyGroupDrag() {
+        const g = this.groupDrag;
+        if (!g || this.gizmo.object !== this.pivot) return;
+        const delta = this.pivot.position.clone().sub(g.pivot);
+        const turn = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.pivot.rotation.y);
+        g.objs.forEach((o, i) => {
+            const st = g.start[i];
+            const rel = st.pos.clone().sub(g.pivot).applyQuaternion(turn);
+            o.position.copy(g.pivot).add(rel).add(delta);
+            o.quaternion.copy(turn).multiply(st.quat);
+        });
+    }
     commitGizmo() {
         const obj = this.gizmo.object;
+        if (obj === this.pivot && this.groupDrag) {
+            const g = this.groupDrag;
+            const delta = this.pivot.position.clone().sub(g.pivot);
+            this.cb.onGroupTransform?.(this.selected, {
+                delta: { x: round(delta.x), y: round(delta.y), z: round(delta.z) },
+                turn: round(rad(this.pivot.rotation.y)),
+                pivot: { x: g.pivot.x, y: g.pivot.y, z: g.pivot.z },
+            });
+            return;
+        }
         if (!obj || !this.selection) return;
         const sel = this.selection;
         if (sel.kind === 'block') {
@@ -385,17 +459,25 @@ export class Viewport {
     bindPointer() {
         const el = this.renderer.domElement;
         let down = null;
-        el.addEventListener('pointerdown', (e) => { if (e.button === 0) down = { x: e.clientX, y: e.clientY }; });
+        el.addEventListener('pointerdown', (e) => {
+            if (e.button !== 0) return;
+            // A left-drag that does not start on the gizmo draws a selection box (select tool).
+            down = { x: e.clientX, y: e.clientY, onGizmo: !!this.gizmo.axis, additive: e.shiftKey || e.ctrlKey || e.metaKey };
+        });
         el.addEventListener('pointerup', (e) => {
             if (e.button !== 0 || !down) return;
             const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4;
+            const d = down;
             down = null;
+            if (this.marqueeActive) { this.finishMarquee(d, e); return; }
             if (moved || this.gizmo.dragging || this.gizmoHovered || this.framing) return;
             this.updatePointer(e);
             if (this.tool === 'place') this.placeAtPointer();
-            else this.pickAtPointer();
+            else this.pickAtPointer(e.shiftKey || e.ctrlKey || e.metaKey);
         });
         el.addEventListener('pointermove', (e) => {
+            if (down && !down.onGizmo && this.tool === 'select' && !this.framing && !this.gizmo.dragging
+                && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) this.drawMarquee(down, e);
             this.updatePointer(e);
             this.gizmoHovered = !!this.gizmo.axis;
             const hit = this.surfaceHit();
@@ -410,12 +492,85 @@ export class Viewport {
         this.pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
         this.raycaster.setFromCamera(this.pointer, this.camera);
     }
-    pickAtPointer() {
+    pickAtPointer(additive = false) {
         const targets = [...this.objectRoot.children.filter((o) => o.userData.kind !== 'decor'), ...this.contentRoot.children];
         const hits = this.raycaster.intersectObjects(targets, true);
-        const hit = hits.find((h) => h.object.userData && h.object.userData.id);
+        // The raycaster also hits hidden objects; skip those and anything locked.
+        const hit = hits.find((h) => h.object.userData && h.object.userData.id && !h.object.userData.locked && visibleChain(h.object));
         const u = hit && hit.object.userData;
-        this.cb.onSelect(u ? (u.part ? { kind: u.kind, id: u.id, part: u.part } : { kind: u.kind, id: u.id }) : null);
+        const sel = u ? (u.part ? { kind: u.kind, id: u.id, part: u.part } : { kind: u.kind, id: u.id }) : null;
+        this.cb.onSelect(sel, { additive });
+    }
+    drawMarquee(down, e) {
+        const r = this.container.getBoundingClientRect();
+        const x0 = Math.min(down.x, e.clientX) - r.left, y0 = Math.min(down.y, e.clientY) - r.top;
+        Object.assign(this.marqueeEl.style, { left: x0 + 'px', top: y0 + 'px', width: Math.abs(e.clientX - down.x) + 'px', height: Math.abs(e.clientY - down.y) + 'px' });
+        this.marqueeEl.hidden = false;
+        this.marqueeActive = true;
+    }
+    // Everything visible and unlocked whose centre falls inside the box.
+    finishMarquee(down, e) {
+        this.marqueeEl.hidden = true;
+        this.marqueeActive = false;
+        const r = this.renderer.domElement.getBoundingClientRect();
+        const minX = Math.min(down.x, e.clientX) - r.left, maxX = Math.max(down.x, e.clientX) - r.left;
+        const minY = Math.min(down.y, e.clientY) - r.top, maxY = Math.max(down.y, e.clientY) - r.top;
+        const inside = (obj) => {
+            const c = new THREE.Box3().setFromObject(obj).getCenter(new THREE.Vector3()).project(this.camera);
+            if (c.z < -1 || c.z > 1) return false;
+            const sx = (c.x + 1) / 2 * r.width, sy = (1 - c.y) / 2 * r.height;
+            return sx >= minX && sx <= maxX && sy >= minY && sy <= maxY;
+        };
+        const found = [];
+        for (const [id, mesh] of this.blockMeshes) if (mesh.visible && !mesh.userData.locked && inside(mesh)) found.push({ kind: 'block', id });
+        for (const [id, obj] of this.objectGroups) {
+            const k = obj.userData.kind;
+            if (!k || k === 'decor' || k === 'cameraPaths' || k === 'brCircle' || !obj.visible || obj.userData.locked) continue;
+            if (inside(obj)) found.push({ kind: k, id });
+        }
+        this.cb.onMarquee?.(found, { additive: down.additive });
+    }
+
+    // ------------------------------------------------------------------ arrow keys move the view
+    // Arrow keys slide the editor camera (and what it orbits) across the ground; PageUp/PageDown
+    // raise and lower it; Shift is faster. Speed scales with how far out the camera is.
+    bindArrowKeys() {
+        const keys = { arrowup: 'f', arrowdown: 'b', arrowleft: 'l', arrowright: 'r', pageup: 'u', pagedown: 'd' };
+        window.addEventListener('keydown', (e) => {
+            if (/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName) || e.ctrlKey || e.metaKey || e.altKey) return;
+            const k = keys[e.key.toLowerCase()];
+            if (k) { this.navKeys.add(k); e.preventDefault(); }
+            if (e.key === 'Shift') this.navKeys.add('fast');
+        });
+        window.addEventListener('keyup', (e) => {
+            const k = keys[e.key.toLowerCase()];
+            if (k) this.navKeys.delete(k);
+            if (e.key === 'Shift') this.navKeys.delete('fast');
+        });
+        window.addEventListener('blur', () => this.navKeys.clear());
+    }
+    stepArrowKeys(dt) {
+        const k = this.navKeys;
+        if (!k.size || (k.size === 1 && k.has('fast'))) return;
+        const fwd = new THREE.Vector3();
+        this.camera.getWorldDirection(fwd);
+        fwd.y = 0;
+        if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
+        fwd.normalize();
+        const right = new THREE.Vector3(-fwd.z, 0, fwd.x);
+        const move = new THREE.Vector3();
+        if (k.has('f')) move.add(fwd);
+        if (k.has('b')) move.sub(fwd);
+        if (k.has('r')) move.add(right);
+        if (k.has('l')) move.sub(right);
+        if (k.has('u')) move.y += 1;
+        if (k.has('d')) move.y -= 1;
+        if (!move.lengthSq()) return;
+        const dist = this.camera.position.distanceTo(this.orbit.target);
+        const speed = Math.max(6, dist * 0.9) * (k.has('fast') ? 3 : 1);
+        move.normalize().multiplyScalar(speed * dt);
+        this.camera.position.add(move);
+        this.orbit.target.add(move);
     }
     // First surface under the pointer: a block face, else the ground plane (y = 0).
     surfaceHit() {
@@ -537,13 +692,16 @@ export class Viewport {
             e.stopImmediatePropagation();
             if (k === 'enter') { e.preventDefault(); this.endFraming(true); return; }
             if (k === 'escape') { e.preventDefault(); this.endFraming(false); return; }
+            const arrow = { arrowup: 'w', arrowdown: 's', arrowleft: 'a', arrowright: 'd', pageup: 'e', pagedown: 'q' }[k];
+            if (arrow) { e.preventDefault(); f.keys.add(arrow); }
             if ('wasdqe'.includes(k) && k.length === 1) { e.preventDefault(); f.keys.add(k); }
             if (k === 'shift') f.keys.add('shift');
         }, true);
         window.addEventListener('keyup', (e) => {
             if (!this.framing) return;
             const k = e.key.toLowerCase();
-            this.framing.keys.delete(k === 'shift' ? 'shift' : k);
+            const arrow = { arrowup: 'w', arrowdown: 's', arrowleft: 'a', arrowright: 'd', pageup: 'e', pagedown: 'q' }[k];
+            this.framing.keys.delete(arrow || k);
         }, true);
         window.addEventListener('blur', () => { if (this.framing) this.framing.keys.clear(); });
         el.addEventListener('pointerdown', (e) => {
@@ -587,7 +745,7 @@ export class Viewport {
         cam.updateMatrixWorld();
 
         const invisibleWalls = this.contentRoot.children.filter((m) => m.userData.invisible);
-        const helpers = [this.gridHelper, this.killPlane, this.gizmo, this.selectionBox, this.ghost, this.objectRoot, ...invisibleWalls];
+        const helpers = [this.gridHelper, this.killPlane, this.gizmo, this.selectionBox, ...this.extraBoxes, this.ghost, this.objectRoot, ...invisibleWalls];
         const workLight = this.ambient.intensity;
         this.ambient.intensity = 0;
         const wasVisible = helpers.map((o) => o.visible);
@@ -674,6 +832,7 @@ export class Viewport {
 
 // ------------------------------------------------------------------ helpers
 const round = (v) => Math.round(v * 1000) / 1000;
+const visibleChain = (o) => { for (let x = o; x; x = x.parent) if (!x.visible) return false; return true; };
 const lerp = (a, b, k) => a + (b - a) * k;
 
 function localBlockGeometry(block) {

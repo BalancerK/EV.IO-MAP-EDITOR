@@ -101,6 +101,100 @@ async function main() {
     d = await doc();
     check(d.teleporters.length === 2, 'redo restores it');
 
+    // ---- item 5: multi-select, group turn, copy/paste, mirror, hide, box select, lock, arrow keys
+    const clickMod = async (x, y, modifiers) => {
+        await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, modifiers });
+        await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1, modifiers });
+        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1, modifiers });
+        await sleep(150);
+    };
+    const keyPress = async (k, code, vk, modifiers = 0, holdMs = 0) => {
+        await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: k, code, windowsVirtualKeyCode: vk, modifiers });
+        if (holdMs) await sleep(holdMs);
+        await send('Input.dispatchKeyEvent', { type: 'keyUp', key: k, code, windowsVirtualKeyCode: vk, modifiers });
+        await sleep(150);
+    };
+    const inspectorTitle = () => evaluate(`document.querySelector('#inspector h3')?.textContent || ''`);
+    const selCount = () => evaluate(`window.__mapEditor.state.selected.length`);
+    const buttonByText = (t) => evaluate(`[...document.querySelectorAll('#inspector button')].find((b) => b.textContent === ${JSON.stringify(t)}).click()`);
+
+    await press('[data-key="b:Box"]');
+    await click(vp.x, vp.y + 150);
+    await press('[data-tool="select"]');
+    await evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    await click(vp.x, vp.y - 10);
+    await clickMod(vp.x, vp.y + 150, 8);              // Shift+click
+    check(/^2 selected/.test(await inspectorTitle()), `Shift+click adds to the selection ("${await inspectorTitle()}")`);
+    d = await doc();
+    const two = (await evaluate(`window.__mapEditor.state.selected.map((s) => s.id)`));
+    const posOf = (dd, id) => dd.blocks.find((b) => b.id === id).position;
+    const gap = (dd) => Math.hypot(posOf(dd, two[0]).x - posOf(dd, two[1]).x, posOf(dd, two[0]).z - posOf(dd, two[1]).z);
+    const gapBefore = gap(d), p0 = posOf(d, two[0]);
+    await keyPress(']', 'BracketRight', 221);
+    d = await doc();
+    check(Math.abs(gap(d) - gapBefore) < 1e-6 && (posOf(d, two[0]).x !== p0.x || posOf(d, two[0]).z !== p0.z), '] turns the group around its centre (spacing kept)');
+    check(d.blocks.find((b) => b.id === two[0]).rotation.y !== 0, '] also turns each block');
+
+    // Group gizmo: move the pivot as a drag would, then commit as the drag's end does.
+    const moved = await evaluate(`(() => {
+        const v = window.__mapEditor.viewport;
+        if (v.gizmo.object !== v.pivot) return 'gizmo not on the group pivot';
+        v.pivot.position.x += 4; v.pivot.position.z -= 2; v.applyGroupDrag(); v.commitGizmo();
+        return 'ok';
+    })()`);
+    const dm = await doc();
+    check(moved === 'ok' && two.every((id) => Math.abs(posOf(dm, id).x - posOf(d, id).x - 4) < 1e-6 && Math.abs(posOf(dm, id).z - posOf(d, id).z + 2) < 1e-6), `dragging the group gizmo moves every selected block (${moved})`);
+    d = dm;
+
+    let nBlocks = d.blocks.length;
+    await buttonByText('Copy');
+    await buttonByText('Paste');
+    d = await doc();
+    check(d.blocks.length === nBlocks + 2 && (await selCount()) === 2, `Copy + Paste adds 2 blocks and selects them (${d.blocks.length - nBlocks})`);
+    nBlocks = d.blocks.length;
+    const pasted = await evaluate(`window.__mapEditor.state.selected.map((s) => s.id)`);
+    const before = pasted.map((id) => posOf(d, id));
+    await buttonByText('Mirror copy ⇆');
+    d = await doc();
+    const mirrored = await evaluate(`window.__mapEditor.state.selected.map((s) => s.id)`);
+    check(d.blocks.length === nBlocks + 2, 'Mirror copy adds the mirrored pieces');
+    check(mirrored.every((id) => before.some((p) => Math.abs(posOf(d, id).z - p.z) < 1e-6)), 'mirrored copies keep their front-back position');
+
+    await keyPress('h', 'KeyH', 72);
+    d = await doc();
+    check(mirrored.every((id) => d.blocks.find((b) => b.id === id).hidden) && (await selCount()) === 0, 'H hides the selection');
+    check((await evaluate(`document.querySelectorAll('#outliner li.is-hidden').length`)) === 2, 'hidden pieces are struck through in the scene list');
+    await keyPress('H', 'KeyH', 72, 8);
+    d = await doc();
+    check(!d.blocks.some((b) => b.hidden), 'Shift+H shows everything again');
+
+    // Box select: drag across the middle of the view.
+    const dragBox = async (x0, y0, x1, y1) => {
+        await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x0, y: y0 });
+        await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: x0, y: y0, button: 'left', clickCount: 1 });
+        for (let i = 1; i <= 6; i++) await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x0 + (x1 - x0) * i / 6, y: y0 + (y1 - y0) * i / 6, button: 'left', buttons: 1 });
+        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: x1, y: y1, button: 'left', clickCount: 1 });
+        await sleep(200);
+    };
+    await evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    await dragBox(vp.x - 260, vp.y - 220, vp.x + 260, vp.y + 230);
+    const boxed = await selCount();
+    check(boxed >= 6, `dragging a box selects what is inside it (${boxed} items)`);
+    await buttonByText('Lock');
+    await evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    await dragBox(vp.x - 260, vp.y - 220, vp.x + 260, vp.y + 230);
+    check((await selCount()) === 0, 'locked pieces are skipped by box select');
+    await click(vp.x, vp.y - 10);
+    check((await selCount()) === 0, 'locked pieces cannot be clicked in the view');
+    // Unlock everything again for the rest of the test.
+    const unlocked = await evaluate(`(() => { let n = 0; for (;;) { const b = document.querySelector('#outliner .icon-btn.on[title^="Locked"]'); if (!b || n > 100) return n; b.click(); n++; } })()`);
+    check(unlocked === boxed, `the scene list's lock toggles unlock them again (${unlocked})`);
+
+    const camBefore = await evaluate(`window.__mapEditor.viewport.camera.position.toArray()`);
+    await keyPress('ArrowUp', 'ArrowUp', 38, 0, 500);
+    const camAfter = await evaluate(`window.__mapEditor.viewport.camera.position.toArray()`);
+    check(Math.hypot(camAfter[0] - camBefore[0], camAfter[2] - camBefore[2]) > 1 && Math.abs(camAfter[1] - camBefore[1]) < 1e-6, `ArrowUp slides the view forward along the ground (${camBefore.map((v) => v.toFixed(1))} -> ${camAfter.map((v) => v.toFixed(1))})`);
+
     await press('#btn-export');
     await sleep(300);
     const exportText = await evaluate(`document.querySelector('#export-body').innerText`);

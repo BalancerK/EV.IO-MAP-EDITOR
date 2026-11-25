@@ -4,7 +4,8 @@
 import { Viewport } from './editor/viewport.js';
 import { newDocument, normaliseDocument, newId, validate, COLLISION, TEAMS } from './model/document.js';
 import { compileDocument, generateCameraPaths } from './model/compile.js';
-import { buildBlockTriangles } from './model/geometry.js';
+import { buildBlockTriangles, blocksBounds } from './model/geometry.js';
+import { collect, remapIds, translate, rotateY, mirror, insert, replace, removeSelection, centreOf, toClipboardText, fromClipboardText } from './model/edit.js';
 import { writeEvmap } from './evmap/format.js';
 
 const STORAGE_KEY = 'evio-map-editor:doc';
@@ -33,6 +34,13 @@ const OBJECT_PIECES = [
     { label: 'Auto paths', type: 'cameraAuto', color: 'var(--camera)', instant: true, title: 'Generate 6 menu camera paths circling the map' },
     { label: 'BR circle', type: 'brCircle', color: 'var(--teleport)', instant: true },
 ];
+const svg = (d) => `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+const ICONS = {
+    eye: svg('<path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/>'),
+    eyeOff: svg('<path d="M2 2l12 12M6.6 4.1A6.6 6.6 0 0 1 8 3.5c4.1 0 6.5 4.5 6.5 4.5a11 11 0 0 1-1.9 2.4M9.9 11.9A6 6 0 0 1 8 12.5C3.9 12.5 1.5 8 1.5 8a11 11 0 0 1 2.3-2.8"/>'),
+    lock: svg('<rect x="3.5" y="7" width="9" height="6.5" rx="1"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/>'),
+    unlock: svg('<rect x="3.5" y="7" width="9" height="6.5" rx="1"/><path d="M5.5 7V5a2.5 2.5 0 0 1 4.9-.7"/>'),
+};
 const KIND_LABEL = { block: 'Block', playerSpawns: 'Player spawn', weaponSpawns: 'Weapon spawn', teleporters: 'Teleporter', navNodes: 'Nav node', cameraPaths: 'Camera path', brCircle: 'Battle royale circle' };
 const KIND_COLOR = { playerSpawns: 'var(--spawn)', weaponSpawns: 'var(--weapon)', teleporters: 'var(--teleport)', navNodes: 'var(--nav)', cameraPaths: 'var(--camera)', brCircle: 'var(--teleport)' };
 const SHAPE_LABEL = { box: 'Box', ramp: 'Ramp', stairs: 'Stairs', cylinder: 'Cylinder', 'wedge-corner': 'Corner wedge' };
@@ -40,7 +48,8 @@ const SHAPE_LABEL = { box: 'Box', ramp: 'Ramp', stairs: 'Stairs', cylinder: 'Cyl
 // ------------------------------------------------------------------ state
 const state = {
     doc: loadAutosave() || newDocument(),
-    selection: null,
+    selection: null,     // the primary (last clicked) item: drives the gizmo and single-item panel
+    selected: [],        // everything selected (multi-select), including the primary
     tool: 'select',
     piece: null,
     currentMaterial: 'mat_concrete',
@@ -95,7 +104,16 @@ function findSelected() {
 
 // ------------------------------------------------------------------ viewport
 const viewport = new Viewport($('#viewport'), {
-    onSelect(sel) { select(sel); },
+    onSelect(sel, opts) { select(sel, opts); },
+    onMarquee(found, { additive }) { selectMany(additive ? mergeSel(state.selected, found) : found); },
+    onGroupTransform(list, t) {
+        change((doc) => {
+            const groups = collect(doc, list);
+            if (t.turn) rotateY(groups, t.turn, t.pivot);
+            translate(groups, t.delta);
+            replace(doc, groups);
+        });
+    },
     onPlace(pos) { placePiece(pos); },
     onTransform(sel, t) {
         change((doc) => {
@@ -119,12 +137,179 @@ const viewport = new Viewport($('#viewport'), {
     onFramingChange(f) { renderFramingBanner(f); },
 });
 
-function select(sel) {
+const sameSel = (a, b) => a.kind === b.kind && a.id === b.id;
+const mergeSel = (a, b) => [...a, ...b.filter((x) => !a.some((y) => sameSel(x, y)))];
+
+// Select one item; with additive (Shift/Ctrl/Cmd-click) add it to, or remove it from, the selection.
+function select(sel, { additive = false } = {}) {
+    if (additive && sel) {
+        const i = state.selected.findIndex((s) => sameSel(s, sel));
+        const next = state.selected.slice();
+        if (i >= 0) next.splice(i, 1); else next.push({ kind: sel.kind, id: sel.id });
+        return selectMany(next);
+    }
+    state.selected = sel ? [sel] : [];
     state.selection = sel;
-    viewport.select(sel);
+    viewport.selectMany(state.selected, sel);
     if (sel) setTab('inspector');
     renderOutliner();
     renderInspector();
+}
+function selectMany(list) {
+    if (list.length <= 1) return select(list[0] || null);
+    state.selected = list.slice();
+    state.selection = list[list.length - 1];
+    viewport.selectMany(state.selected, state.selection);
+    setTab('inspector');
+    renderOutliner();
+    renderInspector();
+}
+function existsSel(s) {
+    if (s.kind === 'brCircle') return !!state.doc.brCircle;
+    return !!(listFor(s.kind) || []).find((x) => x.id === s.id);
+}
+function selectAll() {
+    const all = [];
+    const add = (kind, items) => items.forEach((it) => { if (!it.hidden && !it.locked) all.push({ kind, id: it.id }); });
+    add('block', state.doc.blocks);
+    for (const k of ['playerSpawns', 'weaponSpawns', 'teleporters', 'navNodes']) add(k, state.doc[k]);
+    selectMany(all);
+}
+
+// ------------------------------------------------------------------ arrange: copy, rotate, mirror
+const CLIP_KEY = 'evio-map-editor:clipboard';
+const selectedEditable = () => state.selected.filter((s) => s.kind !== 'brCircle');
+function copySelection() {
+    const groups = collect(state.doc, selectedEditable());
+    const n = Object.values(groups).reduce((s, l) => s + l.length, 0);
+    if (!n) return null;
+    const text = toClipboardText(groups);
+    try { localStorage.setItem(CLIP_KEY, text); } catch { /* storage off: system clipboard only */ }
+    toast(`Copied ${n} item${n === 1 ? '' : 's'}`);
+    return text;
+}
+function pasteText(text) {
+    let groups = fromClipboardText(text || '');
+    if (!groups) { try { groups = fromClipboardText(localStorage.getItem(CLIP_KEY) || ''); } catch { groups = null; } }
+    if (!groups) { toast('Nothing to paste: copy something in the editor first'); return; }
+    const pasted = remapIds(groups);
+    translate(pasted, { x: viewport.grid * 2, y: 0, z: viewport.grid * 2 });
+    let sel;
+    change((doc) => { sel = insert(doc, pasted); });
+    selectMany(sel);
+    toast(`Pasted ${sel.length} item${sel.length === 1 ? '' : 's'}`);
+}
+async function pasteFromButton() {
+    let text = '';
+    try { text = await navigator.clipboard.readText(); } catch { /* no permission: use the editor's own copy */ }
+    pasteText(text);
+}
+function copyFromButton() {
+    const text = copySelection();
+    if (text) navigator.clipboard?.writeText(text).catch(() => {});
+}
+function duplicateSelected() {
+    const groups = collect(state.doc, selectedEditable());
+    if (!Object.keys(groups).length) return;
+    const copies = remapIds(groups);
+    translate(copies, { x: viewport.grid * 2, y: 0, z: viewport.grid * 2 });
+    let sel;
+    change((doc) => { sel = insert(doc, copies); });
+    selectMany(sel);
+}
+function deleteSelected() {
+    if (!state.selected.length) return;
+    const list = state.selected.slice();
+    change((doc) => removeSelection(doc, list));
+    select(null);
+}
+function rotateSelection(degrees) {
+    const list = selectedEditable();
+    if (!list.length) return;
+    change((doc) => {
+        const groups = collect(doc, list);
+        rotateY(groups, degrees, centreOf(groups));
+        replace(doc, groups);
+    });
+}
+// Mirror copy: across the map's centre line (left↔right = x, front↔back = z), swapping team 1 and
+// team 2 spawns, for symmetrical maps. Flip: in place, about the selection's own centre.
+function mapCentre() {
+    if (!state.doc.blocks.length) return { x: 0, y: 0, z: 0 };
+    const { min, max } = blocksBounds(state.doc.blocks);
+    return { x: (min[0] + max[0]) / 2, y: (min[1] + max[1]) / 2, z: (min[2] + max[2]) / 2 };
+}
+function mirrorCopy(axis) {
+    const groups = collect(state.doc, selectedEditable());
+    if (!Object.keys(groups).length) return;
+    const copies = mirror(remapIds(groups), axis, mapCentre()[axis], { swapTeams: true });
+    let sel;
+    change((doc) => { sel = insert(doc, copies); });
+    selectMany(sel);
+    toast(`Mirrored copy across the map's ${axis === 'x' ? 'left-right' : 'front-back'} centre line (teams swapped)`);
+}
+function flipSelection(axis) {
+    const list = selectedEditable();
+    if (!list.length) return;
+    change((doc) => {
+        const groups = collect(doc, list);
+        mirror(groups, axis, centreOf(groups)[axis]);
+        replace(doc, groups);
+    });
+}
+function setFlag(flag, value, list = selectedEditable()) {
+    if (!list.length) return;
+    change((doc) => {
+        for (const s of list) {
+            const item = (s.kind === 'block' ? doc.blocks : doc[s.kind] || []).find((x) => x.id === s.id);
+            if (item) { if (value) item[flag] = true; else delete item[flag]; }
+        }
+    });
+    if (value) select(null);
+}
+function showAll() {
+    change((doc) => { for (const k of ['blocks', 'playerSpawns', 'weaponSpawns', 'teleporters', 'navNodes', 'cameraPaths']) for (const it of doc[k]) delete it.hidden; });
+    toast('Everything is visible again');
+}
+function arrangeCard() {
+    return el('div', { class: 'card' },
+        el('strong', {}, 'Arrange'),
+        el('div', { class: 'row' },
+            el('button', { type: 'button', title: 'Turn 90° to the left ( [ )', onclick: () => rotateSelection(90) }, 'Turn ⟲ 90°'),
+            el('button', { type: 'button', title: 'Turn 90° to the right ( ] )', onclick: () => rotateSelection(-90) }, 'Turn ⟳ 90°')),
+        el('div', { class: 'row' },
+            el('button', { type: 'button', title: "Mirrored copy on the other side of the map's centre line; team 1 and team 2 spawns swap", onclick: () => mirrorCopy('x') }, 'Mirror copy ⇆'),
+            el('button', { type: 'button', title: "Mirrored copy across the map's front-back centre line; teams swap", onclick: () => mirrorCopy('z') }, 'Mirror copy ⇅')),
+        el('div', { class: 'row' },
+            el('button', { type: 'button', title: 'Flip left-right in place', onclick: () => flipSelection('x') }, 'Flip ⇆'),
+            el('button', { type: 'button', title: 'Flip front-back in place', onclick: () => flipSelection('z') }, 'Flip ⇅')),
+        el('div', { class: 'row' },
+            el('button', { type: 'button', title: 'Copy (Ctrl+C)', onclick: copyFromButton }, 'Copy'),
+            el('button', { type: 'button', title: 'Paste (Ctrl+V)', onclick: pasteFromButton }, 'Paste'),
+            el('button', { type: 'button', title: 'Hide in the editor (H). Hidden pieces are still exported.', onclick: () => setFlag('hidden', true) }, 'Hide'),
+            el('button', { type: 'button', title: 'Lock: cannot be clicked or box-selected in the view', onclick: () => setFlag('locked', true) }, 'Lock')));
+}
+function renderMultiInspector(rootEl) {
+    const items = state.selected.map((s) => ({ s, item: s.kind === 'brCircle' ? state.doc.brCircle : (listFor(s.kind) || []).find((x) => x.id === s.id) })).filter((x) => x.item);
+    const counts = {};
+    for (const { s } of items) counts[s.kind] = (counts[s.kind] || 0) + 1;
+    rootEl.append(el('h3', {}, `${items.length} selected`));
+    rootEl.append(el('p', { class: 'empty' }, Object.entries(counts).map(([k, n]) => `${n} ${(KIND_LABEL[k] || k).toLowerCase()}${n === 1 ? '' : 's'}`).join(' · ')
+        + '. Drag the gizmo to move them together; in Rotate mode they turn around their centre.'));
+    const blocks = items.filter((x) => x.s.kind === 'block');
+    if (blocks.length) {
+        const setAll = (fn) => change((doc) => { for (const { s } of blocks) { const b = doc.blocks.find((x) => x.id === s.id); if (b) fn(b); } });
+        const first = blocks[0].item;
+        rootEl.append(selectField('Material (all selected blocks)', blocks.every((b) => b.item.materialId === first.materialId) ? first.materialId : '',
+            [['', 'Mixed'], ...state.doc.materials.map((m) => [m.id, m.name])], (v) => { if (v) setAll((b) => { b.materialId = v; }); }));
+        rootEl.append(selectField('Collision (all selected blocks)', blocks.every((b) => (b.item.collision || 'solid') === (first.collision || 'solid')) ? (first.collision || 'solid') : '', [
+            ['', 'Mixed'], [COLLISION.SOLID, 'Solid (visible, collides)'], [COLLISION.VISUAL, 'Decoration (no collision)'], [COLLISION.INVISIBLE, 'Invisible wall'],
+        ], (v) => { if (v) setAll((b) => { b.collision = v; }); }));
+    }
+    rootEl.append(arrangeCard());
+    rootEl.append(el('div', { class: 'row' },
+        el('button', { type: 'button', onclick: duplicateSelected }, 'Duplicate'),
+        el('button', { type: 'button', class: 'danger', onclick: deleteSelected }, `Delete ${items.length}`)));
 }
 
 function placePiece(pos) {
@@ -163,7 +348,8 @@ function placePiece(pos) {
     });
     // Stay in place mode, but select what was just placed so chaining (nav, teleporters) works.
     state.selection = created;
-    viewport.select(created);
+    state.selected = created ? [created] : [];
+    viewport.selectMany(state.selected, created);
     renderOutliner();
     renderInspector();
 }
@@ -251,7 +437,9 @@ function setTool(tool, piece = null) {
 // ------------------------------------------------------------------ rendering panels
 function refresh() {
     viewport.sync(state.doc);
-    viewport.select(state.selection);
+    state.selected = state.selected.filter(existsSel);
+    if (state.selection && !existsSel(state.selection)) state.selection = state.selected[state.selected.length - 1] || null;
+    viewport.selectMany(state.selected, state.selection);
     $('#map-name').value = state.doc.name;
     $('#btn-undo').disabled = !state.undo.length;
     $('#btn-redo').disabled = !state.redo.length;
@@ -285,10 +473,28 @@ function renderOutliner() {
             if (item.collision === COLLISION.INVISIBLE) dot.style.border = '1px dashed var(--teleport)';
         } else dot.style.background = KIND_COLOR[kind];
         const label = document.createElement('span');
+        label.className = 'name';
         label.textContent = itemName(kind, item, index);
         li.append(dot, label);
-        if (state.selection && state.selection.kind === kind && state.selection.id === item.id) li.classList.add('selected');
-        li.addEventListener('click', () => { select({ kind, id: item.id }); viewport.frameSelection(); });
+        if (kind !== 'brCircle') {
+            const toggle = (flag, onIcon, offIcon, tipOn, tipOff) => {
+                const on = !!item[flag];
+                const b = el('button', { type: 'button', class: `icon-btn${on ? ' on' : ''}`, title: on ? tipOn : tipOff, 'aria-pressed': on ? 'true' : 'false' });
+                b.innerHTML = on ? onIcon : offIcon;
+                b.addEventListener('click', (e) => { e.stopPropagation(); setFlag(flag, !on, [{ kind, id: item.id }]); });
+                return b;
+            };
+            li.append(
+                toggle('hidden', ICONS.eyeOff, ICONS.eye, 'Hidden in the editor (still exported) · click to show', 'Hide in the editor'),
+                toggle('locked', ICONS.lock, ICONS.unlock, 'Locked · click to unlock', 'Lock (no clicking or box-selecting in the view)'));
+        }
+        if (item.hidden) li.classList.add('is-hidden');
+        if (state.selected.some((s) => s.kind === kind && s.id === item.id)) li.classList.add('selected');
+        li.addEventListener('click', (e) => {
+            const additive = e.shiftKey || e.ctrlKey || e.metaKey;
+            select({ kind, id: item.id }, { additive });
+            if (!additive) viewport.frameSelection();
+        });
         ul.appendChild(li);
     };
     doc.playerSpawns.forEach((s, i) => entry('playerSpawns', s, i));
@@ -360,6 +566,7 @@ function editSelected(fn) {
 function renderInspector() {
     const root = $('#inspector');
     root.textContent = '';
+    if (state.selected.length > 1) return renderMultiInspector(root);
     const item = findSelected();
     if (!item) {
         root.append(el('p', { class: 'empty' }, 'Nothing selected. Pick a piece on the left and click in the view to place it, or click something to edit it.'));
@@ -368,7 +575,13 @@ function renderInspector() {
             el('div', { class: 'stat-grid' },
                 el('dt', {}, 'Select / place'), el('dd', {}, 'V / B'),
                 el('dt', {}, 'Move / rotate / resize'), el('dd', {}, 'W / E / R'),
+                el('dt', {}, 'Add to selection'), el('dd', {}, 'Shift+click / drag a box'),
+                el('dt', {}, 'Select all'), el('dd', {}, 'Ctrl+A'),
+                el('dt', {}, 'Copy / paste / cut'), el('dd', {}, 'Ctrl+C / V / X'),
                 el('dt', {}, 'Duplicate'), el('dd', {}, 'Ctrl+D'),
+                el('dt', {}, 'Turn 90°'), el('dd', {}, '[ / ]'),
+                el('dt', {}, 'Hide / show all'), el('dd', {}, 'H / Shift+H'),
+                el('dt', {}, 'Move the view'), el('dd', {}, 'Arrows, PgUp/PgDn'),
                 el('dt', {}, 'Delete'), el('dd', {}, 'Del'),
                 el('dt', {}, 'Frame selection'), el('dd', {}, 'F'),
                 el('dt', {}, 'Undo / redo'), el('dd', {}, 'Ctrl+Z / Ctrl+Y'))));
@@ -440,6 +653,7 @@ function renderInspector() {
         root.append(el('p', { class: 'empty' }, 'Battle royale only: the safe zone starts this big and shrinks towards its centre. Match the map size; set y to the average ground height.'));
     }
 
+    if (kind !== 'brCircle') root.append(arrangeCard());
     root.append(el('div', { class: 'row' },
         kind !== 'brCircle' ? el('button', { type: 'button', onclick: duplicateSelected }, 'Duplicate') : null,
         el('button', { type: 'button', class: 'danger', onclick: deleteSelected }, 'Delete')));
@@ -462,33 +676,6 @@ function linkEditor(label, ids, candidates, kind, onCommit) {
     return el('div', { class: 'field' }, el('span', { class: 'field-label' }, label), chips, add);
 }
 
-function duplicateSelected() {
-    const sel = state.selection;
-    const item = findSelected();
-    if (!item || sel.kind === 'brCircle') return;
-    const copy = JSON.parse(JSON.stringify(item));
-    copy.id = newId(sel.kind === 'block' ? 'blk' : 'obj');
-    const shift = sel.kind === 'block' ? Math.max(viewport.grid, item.size.x) : viewport.grid * 2;
-    if (copy.position) copy.position = { ...copy.position, x: round(copy.position.x + shift) };
-    if (sel.kind === 'cameraPaths') { copy.start.position.x += 5; copy.end.position.x += 5; }
-    if (copy.links) copy.links = [];
-    if (copy.destinations) copy.destinations = [];
-    change((doc) => { listForDoc(doc, sel.kind).push(copy); });
-    select({ kind: sel.kind, id: copy.id });
-}
-function deleteSelected() {
-    const sel = state.selection;
-    if (!sel) return;
-    change((doc) => {
-        if (sel.kind === 'brCircle') { doc.brCircle = null; return; }
-        const list = listForDoc(doc, sel.kind);
-        const i = list.findIndex((x) => x.id === sel.id);
-        if (i >= 0) list.splice(i, 1);
-        for (const n of doc.navNodes) n.links = (n.links || []).filter((id) => id !== sel.id);
-        for (const t of doc.teleporters) t.destinations = (t.destinations || []).filter((id) => id !== sel.id);
-    });
-    select(null);
-}
 const listForDoc = (doc, kind) => (kind === 'block' ? doc.blocks : doc[kind]);
 
 function renderMaterials() {
@@ -752,6 +939,23 @@ function bindUi() {
     $('#download-large').addEventListener('click', () => downloadImage('large'));
     $('#export-download').addEventListener('click', () => { if (lastExport) { download(lastExport, `${slug(state.doc.name)}.evmap`, 'application/octet-stream'); toast('Exported .evmap'); } });
 
+    const typingNow = () => /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName);
+    document.addEventListener('copy', (e) => {
+        if (typingNow() || !state.selected.length) return;
+        const text = copySelection();
+        if (text) { e.clipboardData.setData('text/plain', text); e.preventDefault(); }
+    });
+    document.addEventListener('cut', (e) => {
+        if (typingNow() || !state.selected.length) return;
+        const text = copySelection();
+        if (text) { e.clipboardData.setData('text/plain', text); e.preventDefault(); deleteSelected(); }
+    });
+    document.addEventListener('paste', (e) => {
+        if (typingNow()) return;
+        e.preventDefault();
+        pasteText(e.clipboardData.getData('text/plain'));
+    });
+
     window.addEventListener('keydown', (e) => {
         const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName);
         const mod = e.ctrlKey || e.metaKey;
@@ -759,6 +963,7 @@ function bindUi() {
         if (mod && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { if (!typing) { e.preventDefault(); redo(); } return; }
         if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveProject(); return; }
         if (mod && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicateSelected(); return; }
+        if (mod && e.key.toLowerCase() === 'a' && !typing) { e.preventDefault(); selectAll(); return; }
         if (typing || mod) return;
         const k = e.key.toLowerCase();
         if (k === 'v') setTool('select');
@@ -767,6 +972,10 @@ function bindUi() {
         else if (k === 'e') setGizmo('rotate');
         else if (k === 'r') setGizmo('scale');
         else if (k === 'f') viewport.frameSelection();
+        else if (e.key === '[') rotateSelection(90);
+        else if (e.key === ']') rotateSelection(-90);
+        else if (k === 'h' && e.shiftKey) showAll();
+        else if (k === 'h') setFlag('hidden', true);
         else if (k === 'delete' || k === 'backspace') { e.preventDefault(); deleteSelected(); }
         else if (k === 'escape') {
             // Esc first stops a playing camera preview; only a second Esc stops placing or deselects.
@@ -780,6 +989,9 @@ function setGizmo(mode) {
     document.querySelectorAll('[data-gizmo]').forEach((b) => b.classList.toggle('active', b.dataset.gizmo === mode));
     viewport.setGizmoMode(mode);
 }
+
+// For the browser tests and the devtools console.
+window.__mapEditor = { state, viewport };
 
 buildPalettes();
 bindUi();

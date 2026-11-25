@@ -97,7 +97,7 @@ button.danger { color: var(--danger); }
 /* ---------- workspace ---------- */
 .workspace { flex: 1; display: grid; grid-template-columns: 236px 1fr 300px; min-height: 0; }
 .panel { background: var(--panel); overflow-y: auto; min-height: 0; }
-.panel.left { border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+.panel.left { border-right: 1px solid var(--line); display: flex; flex-direction: column; overflow-x: hidden; }
 .panel.right { border-left: 1px solid var(--line); display: flex; flex-direction: column; }
 .group { padding: 12px 12px 14px; border-bottom: 1px solid var(--line-soft); display: flex; flex-direction: column; gap: 8px; }
 .group.grow { flex: 1; min-height: 160px; }
@@ -148,6 +148,7 @@ input[type="range"] { accent-color: var(--accent); width: 100%; }
 
 .outliner { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; min-height: 0; }
 .outliner li {
+    min-width: 0;
     display: flex; align-items: center; gap: 8px;
     padding: 4px 6px;
     border-radius: 4px;
@@ -157,6 +158,14 @@ input[type="range"] { accent-color: var(--accent); width: 100%; }
 .outliner li:hover { background: var(--panel-2); }
 .outliner li.selected { background: rgba(240, 168, 48, 0.16); color: #ffd28a; }
 .outliner .dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+.outliner .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.outliner li.is-hidden .name { opacity: 0.45; text-decoration: line-through; }
+.icon-btn { padding: 2px 3px; border: 0; background: none; color: var(--text-dim); opacity: 0; line-height: 0; }
+.icon-btn svg { display: block; }
+.outliner li:hover .icon-btn, .icon-btn.on, .icon-btn:focus-visible { opacity: 1; }
+.icon-btn.on { color: var(--accent); }
+.marquee { position: absolute; border: 1px solid var(--accent); background: rgba(240, 168, 48, 0.12); pointer-events: none; z-index: 2; }
+.marquee[hidden] { display: none; }
 
 /* ---------- viewport ---------- */
 .viewport-wrap { position: relative; min-width: 0; min-height: 0; background: #0b0f13; }
