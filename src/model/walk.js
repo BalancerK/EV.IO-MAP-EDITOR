@@ -10,8 +10,7 @@
 // out of the map's collision triangles, with the game's step-up height. The game's capsule sweep is
 // a different algorithm, so contact against edges and corners can differ slightly; heights, gaps,
 // speeds and jumps are the game's numbers.
-import { buildBlockTriangles } from './geometry.js';
-import { COLLISION } from './document.js';
+import { collisionTriangles } from './assets.js';
 
 export const PLAYER = {
     TICK_RATE: 20,
@@ -38,38 +37,42 @@ export const PLAYER = {
 const CELL = 4;
 
 // ------------------------------------------------------------------ the collision world
+// Triangles are kept as one flat Float32Array (official maps reach 600k triangles); the per-triangle
+// record the contact test uses is built only for triangles the player actually comes near.
 export function buildWalkWorld(doc) {
-    const tris = [];
-    for (const b of doc.blocks) {
-        if (b.collision === COLLISION.VISUAL) continue;
-        const { positions } = buildBlockTriangles(b);
-        for (let i = 0; i < positions.length; i += 9) {
-            const a = [positions[i], positions[i + 1], positions[i + 2]];
-            const bb = [positions[i + 3], positions[i + 4], positions[i + 5]];
-            const c = [positions[i + 6], positions[i + 7], positions[i + 8]];
-            const u = sub(bb, a), v = sub(c, a);
-            const n = cross(u, v), len = Math.hypot(n[0], n[1], n[2]);
-            if (len < 1e-10) continue;
-            tris.push({
-                a, b: bb, c, n: [n[0] / len, n[1] / len, n[2] / len],
-                min: [Math.min(a[0], bb[0], c[0]), Math.min(a[1], bb[1], c[1]), Math.min(a[2], bb[2], c[2])],
-                max: [Math.max(a[0], bb[0], c[0]), Math.max(a[1], bb[1], c[1]), Math.max(a[2], bb[2], c[2])],
-            });
-        }
-    }
+    const P = collisionTriangles(doc);
+    const count = P.length / 9;
     const bins = new Map();
-    tris.forEach((t, idx) => {
-        for (let i = Math.floor(t.min[0] / CELL); i <= Math.floor(t.max[0] / CELL); i++)
-            for (let j = Math.floor(t.min[2] / CELL); j <= Math.floor(t.max[2] / CELL); j++) {
+    for (let idx = 0; idx < count; idx++) {
+        const o = idx * 9;
+        const x0 = Math.min(P[o], P[o + 3], P[o + 6]), x1 = Math.max(P[o], P[o + 3], P[o + 6]);
+        const z0 = Math.min(P[o + 2], P[o + 5], P[o + 8]), z1 = Math.max(P[o + 2], P[o + 5], P[o + 8]);
+        for (let i = Math.floor(x0 / CELL); i <= Math.floor(x1 / CELL); i++)
+            for (let j = Math.floor(z0 / CELL); j <= Math.floor(z1 / CELL); j++) {
                 const k = i + ',' + j;
                 let list = bins.get(k);
                 if (!list) bins.set(k, list = []);
                 list.push(idx);
             }
-    });
+    }
+    const cache = new Map();
+    const tri = (idx) => {
+        let t = cache.get(idx);
+        if (t !== undefined) return t;
+        const o = idx * 9;
+        const a = [P[o], P[o + 1], P[o + 2]], b = [P[o + 3], P[o + 4], P[o + 5]], c = [P[o + 6], P[o + 7], P[o + 8]];
+        const n = cross(sub(b, a), sub(c, a)), len = Math.hypot(n[0], n[1], n[2]);
+        t = len < 1e-10 ? null : {
+            a, b, c, n: [n[0] / len, n[1] / len, n[2] / len],
+            min: [Math.min(a[0], b[0], c[0]), Math.min(a[1], b[1], c[1]), Math.min(a[2], b[2], c[2])],
+            max: [Math.max(a[0], b[0], c[0]), Math.max(a[1], b[1], c[1]), Math.max(a[2], b[2], c[2])],
+        };
+        cache.set(idx, t);
+        return t;
+    };
     const teleporters = (doc.teleporters || []).map((t) => ({ ...t, radius: t.radius || 1.5 }));
     const spawns = (doc.playerSpawns || []).filter((s) => s.position);
-    return { tris, bins, teleporters, spawns, stamp: 0, seen: new Uint32Array(tris.length) };
+    return { count, tri, bins, teleporters, spawns, stamp: 0, seen: new Uint32Array(count) };
 }
 
 // Triangles whose bounds overlap the box.
@@ -83,8 +86,8 @@ function near(world, min, max) {
             for (const idx of list) {
                 if (world.seen[idx] === stamp) continue;
                 world.seen[idx] = stamp;
-                const t = world.tris[idx];
-                if (t.max[0] < min[0] || t.min[0] > max[0] || t.max[1] < min[1] || t.min[1] > max[1] || t.max[2] < min[2] || t.min[2] > max[2]) continue;
+                const t = world.tri(idx);
+                if (!t || t.max[0] < min[0] || t.min[0] > max[0] || t.max[1] < min[1] || t.min[1] > max[1] || t.max[2] < min[2] || t.min[2] > max[2]) continue;
                 out.push(t);
             }
         }

@@ -8,6 +8,14 @@ import { buildBlockTriangles } from '../model/geometry.js';
 import { lightDirection, cameraForward, hexToRgb, shadowSettingsFor } from '../model/compile.js';
 import { COLLISION } from '../model/document.js';
 import { buildWalkWorld, newPlayer, stepPlayer, PLAYER } from '../model/walk.js';
+import { docAsset } from '../model/assets.js';
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+
+// Opened official maps reach 600k triangles: a bounding-volume tree per mesh keeps clicking and
+// hovering instant (three.js would otherwise test every triangle).
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
 const COLORS = { spawn: 0x4fd47a, team1: 0x4f8fff, team2: 0xff8a3d, weapon: 0xb07cff, teleport: 0xff5d5d, nav: 0xffd84a, camera: 0x4cc9f0, select: 0xf0a830, br: 0xff5d5d, kill: 0xff3b30 };
 const KILL_Y = -30;
@@ -77,6 +85,11 @@ export class Viewport {
         this.grid = 1;
         this.placing = null;   // { kind: 'block'|'object', shape|type }
         this.blockMeshes = new Map();
+        this.modelObjects = new Map();   // imported map pieces, by id
+        this.showInvisible = true;       // draw invisible walls (translucent) in the editor view
+        this.modelAssetKey = null;       // which opened map the geometry/material caches below belong to
+        this.modelGeometries = new Map();
+        this.modelMaterials = [];
         this.objectGroups = new Map();
         this.materialCache = new Map();
 
@@ -212,6 +225,7 @@ export class Viewport {
         this.doc = doc;
         this.syncEnvironment(doc);
         this.syncBlocks(doc);
+        this.syncModels(doc);
         this.syncObjects(doc);
         this.attachGizmo();
     }
@@ -261,7 +275,7 @@ export class Viewport {
             mesh.position.set(block.position.x, block.position.y, block.position.z);
             mesh.rotation.set(deg(block.rotation.x), deg(block.rotation.y), deg(block.rotation.z), 'XYZ');
             mesh.scale.set(1, 1, 1);
-            mesh.visible = !block.hidden;
+            mesh.visible = !block.hidden && (this.showInvisible || block.collision !== COLLISION.INVISIBLE);
             mesh.userData.locked = !!block.locked;
             mesh.castShadow = block.collision !== COLLISION.INVISIBLE && block.shadows !== false;
             mesh.receiveShadow = block.collision !== COLLISION.INVISIBLE;
@@ -269,6 +283,130 @@ export class Viewport {
         for (const [id, mesh] of this.blockMeshes) {
             if (!seen.has(id)) { this.contentRoot.remove(mesh); mesh.geometry.dispose(); this.blockMeshes.delete(id); }
         }
+    }
+
+    // ------------------------------------------------------------------ opened maps' own pieces
+    // Built the way the game builds them (bundle buildThreeModel / buildEVMaterialEx): the file's
+    // meshes with its materials and textures. The meshes are mirrored here once (the game mirrors
+    // the whole scene instead), so each piece's transform is an ordinary game-space one.
+    prepareModelAsset(key, asset) {
+        if (this.modelAssetKey === key) return;
+        for (const obj of this.modelObjects.values()) this.contentRoot.remove(obj);
+        this.modelObjects.clear();
+        for (const g of this.modelGeometries.values()) { g.disposeBoundsTree?.(); g.dispose(); }
+        this.modelGeometries.clear();
+        for (const m of this.modelMaterials) { m.map?.dispose(); m.normalMap?.dispose(); m.emissiveMap?.dispose(); m.dispose(); }
+        this.modelAssetKey = key;
+        this.modelMaterials = asset ? this.buildModelMaterials(asset) : [];
+    }
+    buildModelMaterials(asset) {
+        const loader = new THREE.TextureLoader();
+        const textures = asset.textures.map((t) => {
+            const url = URL.createObjectURL(new Blob([t.data], { type: t.format === 1 ? 'image/jpeg' : 'image/png' }));
+            const tex = loader.load(url, () => URL.revokeObjectURL(url));
+            tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+            return tex;
+        });
+        const inv = (1 - (this.doc?.environment?.shadowStrength ?? 0.75)).toFixed(4);
+        const list = asset.materialsEx || asset.materials.map((material) => ({ shader: 0, material }));
+        return list.map((e) => {
+            const m = e.material;
+            if (e.shader === 0 && m) {
+                const mat = new THREE.MeshToonMaterial({
+                    color: new THREE.Color(m.color?.r ?? 1, m.color?.g ?? 1, m.color?.b ?? 1),
+                    opacity: m.colorAlpha ?? 1, transparent: (m.colorAlpha ?? 1) < 0.99,
+                    gradientMap: toonGradient, dithering: true, side: THREE.FrontSide, shadowSide: THREE.DoubleSide,
+                    defines: { TOON: '', SHADOW_INV_STRENGTH: inv, EV_USE_SHADOW_HACK: '' },
+                });
+                if (m.colorMapIndex !== undefined && textures[m.colorMapIndex]) mat.map = textures[m.colorMapIndex];
+                if (m.emissionColor) mat.emissive = new THREE.Color(m.emissionColor.r, m.emissionColor.g, m.emissionColor.b);
+                if (m.emissionMapIndex !== undefined && textures[m.emissionMapIndex]) mat.emissiveMap = textures[m.emissionMapIndex];
+                if (m.emissionIntensity !== undefined) mat.emissiveIntensity = m.emissionIntensity;
+                if (m.normalMapIndex !== undefined && m.normalMapIndex >= 0 && textures[m.normalMapIndex]) { mat.normalMap = textures[m.normalMapIndex]; mat.normalScale.y = -1; }
+                return mat;
+            }
+            // Shaders 1 and 2 draw as flat unlit colour in game; 3 is a billboard placeholder.
+            const c = m && m.color ? new THREE.Color(m.color.r, m.color.g, m.color.b) : new THREE.Color(1, 1, 1);
+            return new THREE.MeshBasicMaterial({ color: c, side: THREE.FrontSide });
+        });
+    }
+    modelGeometry(asset, index) {
+        let g = this.modelGeometries.get(index);
+        if (g) return g;
+        const mesh = asset.meshes[index];
+        g = new THREE.BufferGeometry();
+        const v = Float32Array.from(mesh.vertexBuffer);
+        for (let i = 0; i < v.length; i += 3) v[i] = -v[i];
+        g.setAttribute('position', new THREE.BufferAttribute(v, 3));
+        if (mesh.normalBuffer && mesh.normalBuffer.length) {
+            const n = Float32Array.from(mesh.normalBuffer);
+            for (let i = 0; i < n.length; i += 3) n[i] = -n[i];
+            g.setAttribute('normal', new THREE.BufferAttribute(n, 3));
+        }
+        if (mesh.uvBuffer && mesh.uvBuffer.length) g.setAttribute('uv', new THREE.BufferAttribute(Float32Array.from(mesh.uvBuffer), 2));
+        const total = mesh.submeshes.reduce((s, sm) => s + sm.indexBuffer.length, 0);
+        const index32 = new Uint32Array(total);
+        let o = 0;
+        mesh.submeshes.forEach((sm, h) => {
+            const ib = sm.indexBuffer;
+            for (let i = 0; i + 2 < ib.length; i += 3) { index32[o + i] = ib[i]; index32[o + i + 1] = ib[i + 2]; index32[o + i + 2] = ib[i + 1]; }
+            g.addGroup(o, ib.length, h);
+            o += ib.length;
+        });
+        g.setIndex(new THREE.BufferAttribute(index32, 1));
+        if (!g.getAttribute('normal')) g.computeVertexNormals();
+        g.computeBoundingSphere();
+        g.computeBoundingBox();
+        g.computeBoundsTree();
+        this.modelGeometries.set(index, g);
+        return g;
+    }
+    syncModels(doc) {
+        const asset = docAsset(doc);
+        this.prepareModelAsset(asset ? doc.base.key : null, asset);
+        const inv = (1 - (doc.environment.shadowStrength ?? 0.75)).toFixed(4);
+        for (const m of this.modelMaterials) if (m.defines && m.defines.SHADOW_INV_STRENGTH !== inv) { m.defines.SHADOW_INV_STRENGTH = inv; m.needsUpdate = true; }
+        const seen = new Set();
+        if (asset) for (const md of doc.models || []) {
+            const mesh0 = asset.meshes[md.mesh];
+            if (!mesh0 || !mesh0.vertexBuffer.length) continue;
+            seen.add(md.id);
+            const sig = JSON.stringify([md.mesh, md.materials, md.render, !!md.matrix]);
+            let obj = this.modelObjects.get(md.id);
+            if (!obj || obj.userData.sig !== sig) {
+                if (obj) this.contentRoot.remove(obj);
+                const geo = this.modelGeometry(asset, md.mesh);
+                const mats = md.render
+                    ? mesh0.submeshes.map((_, h) => this.modelMaterials[md.materials[Math.min(h, md.materials.length - 1)] ?? 0] || this.modelMaterials[0])
+                    // Official maps wrap whole areas in invisible collision: drawn fainter than a block's.
+                    : this.cachedMaterial('invisible-piece', () => new THREE.MeshBasicMaterial({ color: 0xff5d5d, transparent: true, opacity: 0.07, depthWrite: false }));
+                const mesh = new THREE.Mesh(geo, mats);
+                if (md.matrix) {
+                    // A sheared piece: the shape lives in a child's fixed matrix; the parent moves it.
+                    obj = new THREE.Group();
+                    mesh.matrixAutoUpdate = false;
+                    const m = md.matrix.m;
+                    mesh.matrix.set(m[0], m[1], m[2], 0, m[3], m[4], m[5], 0, m[6], m[7], m[8], 0, 0, 0, 0, 1);
+                    obj.add(mesh);
+                } else obj = mesh;
+                obj.userData = { sig };
+                this.contentRoot.add(obj);
+                this.modelObjects.set(md.id, obj);
+            }
+            const ud = { sig, kind: 'models', id: md.id, locked: !!md.locked, invisible: !md.render };
+            obj.traverse((o) => { o.userData = { ...ud }; });
+            if (md.matrix) {
+                obj.position.set(md.matrix.t[0], md.matrix.t[1], md.matrix.t[2]);
+                obj.rotation.set(0, 0, 0); obj.scale.set(1, 1, 1);
+            } else {
+                obj.position.set(md.position.x, md.position.y, md.position.z);
+                obj.rotation.set(deg(md.rotation.x), deg(md.rotation.y), deg(md.rotation.z), 'XYZ');
+                obj.scale.set(md.scale.x, md.scale.y, md.scale.z);
+            }
+            obj.visible = !md.hidden && (this.showInvisible || md.render);
+            obj.traverse((o) => { if (o.isMesh) { o.castShadow = md.render && md.shadows; o.receiveShadow = md.render; } });
+        }
+        for (const [id, obj] of this.modelObjects) if (!seen.has(id)) { this.contentRoot.remove(obj); this.modelObjects.delete(id); }
     }
 
     syncObjects(doc) {
@@ -369,6 +507,7 @@ export class Viewport {
     objectFor(sel) {
         if (!sel) return null;
         if (sel.kind === 'block') return this.blockMeshes.get(sel.id) || null;
+        if (sel.kind === 'models') return this.modelObjects.get(sel.id) || null;
         const group = this.objectGroups.get(sel.id) || null;
         if (group && sel.kind === 'cameraPaths' && sel.part) return group.children.find((c) => c.userData.part === sel.part) || group;
         return group;
@@ -376,6 +515,7 @@ export class Viewport {
     selectedObject3D() {
         if (!this.selection) return null;
         if (this.selection.kind === 'block') return this.blockMeshes.get(this.selection.id) || null;
+        if (this.selection.kind === 'models') return this.modelObjects.get(this.selection.id) || null;
         const group = this.objectGroups.get(this.selection.id) || null;
         if (group && this.selection.kind === 'cameraPaths' && this.selection.part) {
             return group.children.find((c) => c.userData.part === this.selection.part) || group;
@@ -388,9 +528,11 @@ export class Viewport {
         const obj = this.tool === 'select' ? this.selectedObject3D() : null;
         if (!obj) { this.gizmo.detach(); this.selectionBox.visible = false; return; }
         const kind = this.selection.kind;
-        // Only blocks rotate on all axes and resize; markers just move (yaw is edited as a number).
+        // Blocks and map pieces rotate on all axes and resize; markers just move (yaw is edited as a
+        // number), and so does a sheared map piece (its shape is a fixed matrix).
         const mode = this.gizmo.getMode();
-        if (kind !== 'block' && mode !== 'translate') this.gizmo.setMode('translate');
+        const free = kind === 'block' || (kind === 'models' && !(this.doc.models || []).find((m) => m.id === this.selection.id)?.matrix);
+        if (!free && mode !== 'translate') this.gizmo.setMode('translate');
         this.gizmo.showX = true; this.gizmo.showY = true; this.gizmo.showZ = true;
         if (kind === 'cameraPaths' && !this.selection.part) { this.gizmo.detach(); }
         else this.gizmo.attach(obj);
@@ -453,6 +595,16 @@ export class Viewport {
                 position: { x: round(obj.position.x), y: round(obj.position.y), z: round(obj.position.z) },
                 rotation: { x: round(rad(obj.rotation.x)), y: round(rad(obj.rotation.y)), z: round(rad(obj.rotation.z)) },
                 size: { x: snapSize(size.x), y: snapSize(size.y), z: snapSize(size.z) },
+            });
+        } else if (sel.kind === 'models') {
+            const md = (this.doc.models || []).find((m) => m.id === sel.id);
+            if (!md) return;
+            const position = { x: round(obj.position.x), y: round(obj.position.y), z: round(obj.position.z) };
+            if (md.matrix) { this.cb.onTransform(sel, { position }); return; }
+            this.cb.onTransform(sel, {
+                position,
+                rotation: { x: rad(obj.rotation.x), y: rad(obj.rotation.y), z: rad(obj.rotation.z) },
+                scale: { x: obj.scale.x, y: obj.scale.y, z: obj.scale.z },
             });
         } else {
             // Camera markers sit in a group at the origin, so their local position is world position.
@@ -529,6 +681,7 @@ export class Viewport {
         };
         const found = [];
         for (const [id, mesh] of this.blockMeshes) if (mesh.visible && !mesh.userData.locked && inside(mesh)) found.push({ kind: 'block', id });
+        for (const [id, obj] of this.modelObjects) if (obj.visible && !obj.userData.locked && inside(obj)) found.push({ kind: 'models', id });
         for (const [id, obj] of this.objectGroups) {
             const k = obj.userData.kind;
             if (!k || k === 'decor' || k === 'cameraPaths' || k === 'brCircle' || !obj.visible || obj.userData.locked) continue;
@@ -580,9 +733,14 @@ export class Viewport {
     }
     // First surface under the pointer: a block face, else the ground plane (y = 0).
     surfaceHit() {
-        const hits = this.raycaster.intersectObjects(this.contentRoot.children, false);
+        const hits = this.raycaster.intersectObjects(this.contentRoot.children, true);
         if (hits.length) {
             const h = hits[0];
+            if (h.object.userData.kind === 'models') {
+                const normal = h.face.normal.clone().transformDirection(h.object.matrixWorld);
+                if (h.object.matrixWorld.determinant() < 0) normal.negate();
+                return { point: h.point.clone(), normal, blockId: null };
+            }
             const normal = h.face.normal.clone().transformDirection(h.object.matrixWorld);
             return { point: h.point.clone(), normal, blockId: h.object.userData.id };
         }
@@ -958,6 +1116,15 @@ export class Viewport {
         const dir = this.camera.position.clone().sub(this.orbit.target).normalize();
         this.orbit.target.copy(c);
         this.camera.position.copy(c).addScaledVector(dir, r * 1.4);
+    }
+    /** Point the view at a box ({ min, max } arrays) so all of it is in sight. */
+    frameBox(box) {
+        if (!box) return;
+        const c = new THREE.Vector3((box.min[0] + box.max[0]) / 2, (box.min[1] + box.max[1]) / 2, (box.min[2] + box.max[2]) / 2);
+        const r = Math.max(10, Math.hypot(box.max[0] - box.min[0], box.max[1] - box.min[1], box.max[2] - box.min[2]) / 2);
+        this.orbit.target.copy(c);
+        this.camera.position.copy(c).add(new THREE.Vector3(0.6, 0.55, 0.6).normalize().multiplyScalar(r * 1.15));
+        this.camera.lookAt(c);
     }
     // Play one camera path, or several in a row (the menu loop: each path once, in order).
     playFlyover(paths) {

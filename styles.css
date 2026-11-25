@@ -156,6 +156,8 @@ input[type="range"] { accent-color: var(--accent); width: 100%; }
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .outliner li:hover { background: var(--panel-2); }
+.outliner li.group-head { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; border-top: 1px solid var(--line-soft); margin-top: 4px; }
+.outliner .caret { width: 10px; flex-shrink: 0; text-align: center; }
 .outliner li.selected { background: rgba(240, 168, 48, 0.16); color: #ffd28a; }
 .outliner .dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
 .outliner .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }

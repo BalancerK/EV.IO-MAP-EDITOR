@@ -3,10 +3,10 @@
 import { rotationMatrix } from './geometry.js';
 import { newId } from './document.js';
 
-export const LIST_KINDS = ['blocks', 'playerSpawns', 'weaponSpawns', 'teleporters', 'navNodes', 'cameraPaths'];
+export const LIST_KINDS = ['blocks', 'models', 'playerSpawns', 'weaponSpawns', 'teleporters', 'navNodes', 'cameraPaths'];
 export const kindToList = (kind) => (kind === 'block' ? 'blocks' : kind);
 export const listToKind = (list) => (list === 'blocks' ? 'block' : list);
-const ID_PREFIX = { blocks: 'blk', playerSpawns: 'spawn', weaponSpawns: 'wpn', teleporters: 'tp', navNodes: 'nav', cameraPaths: 'cam' };
+const ID_PREFIX = { blocks: 'blk', models: 'mdl', playerSpawns: 'spawn', weaponSpawns: 'wpn', teleporters: 'tp', navNodes: 'nav', cameraPaths: 'cam' };
 const r3 = (v) => Math.round(v * 1000) / 1000;
 const wrap360 = (a) => r3(((a % 360) + 360) % 360);
 
@@ -16,7 +16,7 @@ export function collect(doc, selection) {
     for (const s of selection) {
         const list = kindToList(s.kind);
         if (!LIST_KINDS.includes(list)) continue;
-        const item = doc[list].find((x) => x.id === s.id);
+        const item = (doc[list] || []).find((x) => x.id === s.id);
         if (!item) continue;
         (out[list] ||= []).push(JSON.parse(JSON.stringify(item)));
     }
@@ -52,10 +52,16 @@ export function centreOf(groups) {
     return n ? { x: x / n, y: y / n, z: z / n } : { x: 0, y: 0, z: 0 };
 }
 
+// An imported piece with a sheared transform keeps its exact matrix; keep its translation in step
+// with `position` and apply rotations and mirrors to the matrix itself.
+const syncMatrix = (it) => { if (it.matrix) it.matrix.t = [it.position.x, it.position.y, it.position.z]; };
+const premul = (it, r) => { if (it.matrix) it.matrix.m = mul3(r, it.matrix.m); };
+
 /** Move every item by d (in place). */
 export function translate(groups, d) {
     for (const [list, items] of Object.entries(groups)) for (const it of items) {
         for (const p of positionsOf(list, it)) { p.x = r3(p.x + d.x); p.y = r3(p.y + d.y); p.z = r3(p.z + d.z); }
+        if (list === 'models') syncMatrix(it);
     }
     return groups;
 }
@@ -76,6 +82,11 @@ export function rotateY(groups, degrees, pivot) {
     for (const [list, items] of Object.entries(groups)) for (const it of items) {
         for (const p of positionsOf(list, it)) orbit(p);
         if (list === 'blocks') it.rotation = eulerXYZFromMatrix(mul3(rotationMatrix({ x: 0, y: degrees, z: 0 }), rotationMatrix(it.rotation)));
+        else if (list === 'models') {
+            const ry = rotationMatrix({ x: 0, y: degrees, z: 0 });
+            it.rotation = eulerXYZFromMatrix(mul3(ry, rotationMatrix(it.rotation)));
+            premul(it, ry); syncMatrix(it);
+        }
         else if (list === 'cameraPaths') { it.start.yaw = wrap360(it.start.yaw + degrees); it.end.yaw = wrap360(it.end.yaw + degrees); }
         else if ('yaw' in it) it.yaw = wrap360((it.yaw || 0) + degrees);
     }
@@ -105,6 +116,12 @@ export function mirror(groups, axis, plane, { swapTeams = false } = {}) {
             if (axis === 'z') m = mul3(rotationMatrix({ x: 0, y: 180, z: 0 }), m);
             it.rotation = eulerXYZFromMatrix(m);
             if (it.shape === 'wedge-corner') it.size = { x: it.size.z, y: it.size.y, z: it.size.x };
+        } else if (list === 'models') {
+            // Reflect the world: S·R·D = (S·R·S)·(S·D), a rotation and the same scale with one axis negated.
+            const S = axis === 'x' ? SX : [1, 0, 0, 0, 1, 0, 0, 0, -1];
+            it.rotation = eulerXYZFromMatrix(mul3(mul3(S, rotationMatrix(it.rotation)), S));
+            it.scale = axis === 'x' ? { ...it.scale, x: -it.scale.x } : { ...it.scale, z: -it.scale.z };
+            premul(it, S); syncMatrix(it);
         } else if (list === 'cameraPaths') {
             it.start.yaw = flipYaw(it.start.yaw); it.end.yaw = flipYaw(it.end.yaw);
         } else if ('yaw' in it) {
@@ -122,6 +139,7 @@ export function insert(doc, groups) {
     const sel = [];
     for (const [list, items] of Object.entries(groups)) {
         if (!LIST_KINDS.includes(list)) continue;
+        doc[list] ||= [];
         for (const it of items) { doc[list].push(it); sel.push({ kind: listToKind(list), id: it.id }); }
     }
     return sel;
@@ -140,7 +158,7 @@ export function replace(doc, groups) {
 /** Remove the selected items, and any links pointing at them. */
 export function removeSelection(doc, selection) {
     const ids = new Set(selection.map((s) => s.id));
-    for (const list of LIST_KINDS) doc[list] = doc[list].filter((x) => !ids.has(x.id));
+    for (const list of LIST_KINDS) doc[list] = (doc[list] || []).filter((x) => !ids.has(x.id));
     for (const n of doc.navNodes) n.links = (n.links || []).filter((id) => !ids.has(id));
     for (const t of doc.teleporters) t.destinations = (t.destinations || []).filter((id) => !ids.has(id));
     if (selection.some((s) => s.kind === 'brCircle')) doc.brCircle = null;
@@ -148,13 +166,16 @@ export function removeSelection(doc, selection) {
 
 // ---- clipboard text format (works across maps, tabs and browsers)
 const CLIP_TAG = 'evio-map-editor/clipboard@1';
-export function toClipboardText(groups) { return JSON.stringify({ format: CLIP_TAG, groups }); }
-export function fromClipboardText(text) {
+// Imported pieces only make sense in a map opened from the same .evmap (they point at its meshes), so
+// the clipboard records which one; pasting elsewhere drops them.
+export function toClipboardText(groups, baseKey = null) { return JSON.stringify({ format: CLIP_TAG, base: baseKey, groups }); }
+export function fromClipboardText(text, baseKey = null) {
     try {
         const data = JSON.parse(text);
         if (data && data.format === CLIP_TAG && data.groups && typeof data.groups === 'object') {
             const groups = {};
             for (const list of LIST_KINDS) if (Array.isArray(data.groups[list])) groups[list] = data.groups[list];
+            if (groups.models && (!baseKey || data.base !== baseKey)) delete groups.models;
             return Object.keys(groups).length ? groups : null;
         }
     } catch { /* not ours */ }

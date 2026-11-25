@@ -11,7 +11,8 @@
 //
 // The body sizes are the ev.io player's (the client's PLAYER_HEIGHT, PLAYER_RADIUS and STEP_UP_MAX);
 // a link may drop no more than it could climb back, because bots use every link both ways.
-import { buildBlockTriangles, rotationMatrix } from './geometry.js';
+import { rotationMatrix } from './geometry.js';
+import { collisionTriangles } from './assets.js';
 import { COLLISION, newId } from './document.js';
 
 export const NAV = {
@@ -25,46 +26,44 @@ export const NAV = {
 };
 const CELL = 4;   // spatial bin size for triangle lookups
 
-/** Collision triangles of the map, binned in XZ for fast vertical-ray queries. */
+/** Collision triangles of the map (blocks and imported models), binned in XZ for vertical-ray queries. */
 export function buildCollider(doc) {
-    const tris = [];
-    for (const b of doc.blocks) {
-        if (b.collision === COLLISION.VISUAL) continue;
-        const { positions, normals } = buildBlockTriangles(b);
-        for (let i = 0; i < positions.length; i += 9) {
-            tris.push({
-                a: [positions[i], positions[i + 1], positions[i + 2]],
-                b: [positions[i + 3], positions[i + 4], positions[i + 5]],
-                c: [positions[i + 6], positions[i + 7], positions[i + 8]],
-                ny: normals[i + 1],
-            });
-        }
-    }
+    const P = collisionTriangles(doc);
+    const count = P.length / 9;
+    const NY = new Float32Array(count);
     const bins = new Map();
     const key = (i, j) => `${i},${j}`;
     let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity, maxY = -Infinity;
-    tris.forEach((t, idx) => {
-        const xs = [t.a[0], t.b[0], t.c[0]], zs = [t.a[2], t.b[2], t.c[2]];
-        const x0 = Math.min(...xs), x1 = Math.max(...xs), z0 = Math.min(...zs), z1 = Math.max(...zs);
+    for (let idx = 0; idx < count; idx++) {
+        const o = idx * 9;
+        const ux = P[o + 3] - P[o], uy = P[o + 4] - P[o + 1], uz = P[o + 5] - P[o + 2];
+        const vx = P[o + 6] - P[o], vy = P[o + 7] - P[o + 1], vz = P[o + 8] - P[o + 2];
+        const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+        const len = Math.hypot(nx, ny, nz);
+        NY[idx] = len > 1e-12 ? ny / len : 0;
+        const x0 = Math.min(P[o], P[o + 3], P[o + 6]), x1 = Math.max(P[o], P[o + 3], P[o + 6]);
+        const z0 = Math.min(P[o + 2], P[o + 5], P[o + 8]), z1 = Math.max(P[o + 2], P[o + 5], P[o + 8]);
         minX = Math.min(minX, x0); maxX = Math.max(maxX, x1); minZ = Math.min(minZ, z0); maxZ = Math.max(maxZ, z1);
-        maxY = Math.max(maxY, t.a[1], t.b[1], t.c[1]);
+        maxY = Math.max(maxY, P[o + 1], P[o + 4], P[o + 7]);
         for (let i = Math.floor(x0 / CELL); i <= Math.floor(x1 / CELL); i++)
             for (let j = Math.floor(z0 / CELL); j <= Math.floor(z1 / CELL); j++) {
                 const k = key(i, j);
-                if (!bins.has(k)) bins.set(k, []);
-                bins.get(k).push(idx);
+                let list = bins.get(k);
+                if (!list) bins.set(k, list = []);
+                list.push(idx);
             }
-    });
+    }
     return {
-        tris, bounds: { minX, maxX, minZ, maxZ, maxY },
+        count, bounds: { minX, maxX, minZ, maxZ, maxY },
         /** Every surface crossing the vertical line at (x, z): [{ y, up }] sorted from the top. */
         column(x, z) {
             const list = bins.get(key(Math.floor(x / CELL), Math.floor(z / CELL))) || [];
             const hits = [];
             for (const idx of list) {
-                const t = tris[idx];
-                const y = verticalHit(t, x, z);
-                if (y !== null && Math.abs(t.ny) > 1e-6) hits.push({ y, up: t.ny > 0, ny: t.ny });
+                const ny = NY[idx];
+                if (Math.abs(ny) <= 1e-6) continue;
+                const y = verticalHit(P, idx * 9, x, z);
+                if (y !== null) hits.push({ y, up: ny > 0, ny });
             }
             hits.sort((p, q) => q.y - p.y);
             return hits;
@@ -72,9 +71,9 @@ export function buildCollider(doc) {
     };
 }
 
-// Height where the vertical line through (x, z) crosses triangle t, or null.
-function verticalHit(t, x, z) {
-    const [ax, ay, az] = t.a, [bx, by, bz] = t.b, [cx, cy, cz] = t.c;
+// Height where the vertical line through (x, z) crosses the triangle at P[o..o+8], or null.
+function verticalHit(P, o, x, z) {
+    const ax = P[o], ay = P[o + 1], az = P[o + 2], bx = P[o + 3], by = P[o + 4], bz = P[o + 5], cx = P[o + 6], cy = P[o + 7], cz = P[o + 8];
     const d = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
     if (Math.abs(d) < 1e-12) return null;
     const l1 = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / d;
@@ -149,7 +148,7 @@ export function canWalk(col, a, b) {
  */
 export function generateNavNodes(doc, { spacing = 4 } = {}) {
     const col = buildCollider(doc);
-    if (!col.tris.length) return { nodes: [], stats: { nodes: 0, links: 0, areas: 0, unreachableSpawns: [] } };
+    if (!col.count) return { nodes: [], stats: { nodes: 0, links: 0, areas: 0, unreachableSpawns: [] } };
     const { minX, maxX, minZ, maxZ } = col.bounds;
     const points = [];
     const add = (x, z) => { for (const y of floorsAt(col, x, z)) points.push({ x, y, z, links: new Set() }); };

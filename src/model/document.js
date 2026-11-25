@@ -58,6 +58,8 @@ export function newDocument(name = 'Untitled map') {
         name,
         materials: DEFAULT_MATERIALS.map((m) => ({ ...m })),
         blocks: [floor],
+        models: [],          // pieces of an opened .evmap (see importer.js); their geometry lives in doc.base
+        base: null,          // the opened .evmap the models come from (importer.js), or null
         playerSpawns: [
             { id: newId('spawn'), position: { x: -20, y: 0.1, z: 0 }, yaw: 270, team: 'neutral' },
             { id: newId('spawn'), position: { x: 20, y: 0.1, z: 0 }, yaw: 90, team: 'neutral' },
@@ -77,7 +79,8 @@ export function normaliseDocument(doc) {
     const base = newDocument(doc.name);
     const out = { ...base, ...doc, version: DOC_VERSION };
     out.environment = { ...defaultEnvironment(), ...(doc.environment || {}) };
-    for (const key of ['materials', 'blocks', 'playerSpawns', 'weaponSpawns', 'teleporters', 'navNodes', 'cameraPaths', 'lights']) {
+    if (!out.base) out.base = null;
+    for (const key of ['materials', 'blocks', 'models', 'playerSpawns', 'weaponSpawns', 'teleporters', 'navNodes', 'cameraPaths', 'lights']) {
         if (!Array.isArray(out[key])) out[key] = base[key];
     }
     return out;
@@ -88,14 +91,14 @@ export function validate(doc) {
     const issues = [];
     const add = (level, text) => issues.push({ level, text });
     if (!doc.playerSpawns.length) add('error', 'No player spawns: everyone would spawn at the map origin.');
-    if (!doc.blocks.some((b) => b.collision !== COLLISION.VISUAL)) add('error', 'Nothing has collision: players would fall through the map.');
+    if (!doc.blocks.some((b) => b.collision !== COLLISION.VISUAL) && !(doc.models || []).some((m) => m.collide)) add('error', 'Nothing has collision: players would fall through the map.');
     if (!doc.lights.length) add('error', 'No lights: the map would render black.');
     if (doc.lights.filter((l) => l.castsShadow).length > 1) add('warn', 'More than one shadow-casting light: the game uses only the first.');
     if (!doc.weaponSpawns.length) add('warn', 'No weapon spawns: pickup weapons will not appear.');
     if (!doc.navNodes.length) add('warn', 'No bot nav nodes: bots will stand still.');
     if (!doc.cameraPaths.length) add('warn', 'No camera paths: the menu camera will not move.');
     for (const s of doc.playerSpawns) if (s.position.y < -30) { add('error', 'A player spawn is below the kill zone (y = -30).'); break; }
-    if (doc.blocks.length && doc.blocks.every((b) => b.position.y < -30)) add('error', 'The whole map is below the kill zone (y = -30).');
+    if (doc.blocks.length && !(doc.models || []).length && doc.blocks.every((b) => b.position.y < -30)) add('error', 'The whole map is below the kill zone (y = -30).');
     if (doc.teleporters.some((t) => !t.destinations?.length)) add('warn', 'A teleporter has no destination (it will do nothing).');
     return issues;
 }

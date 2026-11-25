@@ -28,13 +28,17 @@ export const LIGHT = { CASTS_SHADOW: 1, SHADOW_STRENGTH: 2 };
 
 // ------------------------------------------------------------------ read
 
+// Meshes and materials also keep their exact bytes (`raw`), so a map opened in the editor writes
+// its original geometry and materials back unchanged instead of re-encoding them.
 function readMesh(r) {
+    const start = r.pos;
     const features = r.u8();
     const m = { features, vertexBuffer: r.boundedVec3(), submeshes: r.list((r) => ({ indexBuffer: r.u16ArrayN(r.u16()) })) };
     if (features & MESH.NORMALS) m.normalBuffer = r.boundedVec3();
     if (features & MESH.UV) m.uvBuffer = r.boundedVec2();
     if (features & MESH.LIGHT_UV) m.lightUvBuffer = r.boundedVec2();
     if (features & MESH.PALETTE_UV) { m.features |= MESH.UV; m.uvBuffer = r.paletteUv(); }
+    m.raw = r.bytes.slice(start, r.pos);
     return m;
 }
 
@@ -45,6 +49,7 @@ function readTexture(r) {
 }
 
 function readMaterial(r) {
+    const start = r.pos;
     const features = r.u8();
     const m = { features };
     if (features & MAT.EXT) m.features2 = r.u8();
@@ -64,16 +69,19 @@ function readMaterial(r) {
         if (f2 & MAT2.NORMAL_MAP) m.normalMapIndex = r.i16();
         if (f2 & MAT2.UV_SCALE_OFFSET) m.uvScaleOffset = r.vec4();
     }
+    m.raw = r.bytes.slice(start, r.pos);
     return m;
 }
 
+// Shaders: 0 standard (toon-lit in game), 1 toon (drawn unlit), 2 unlit colour, 3 billboard (no data).
 function readMaterialEx(r) {
     const shader = r.u8();
+    const start = r.pos;
     let material;
     if (shader === 0) material = readMaterial(r);
     else if (shader === 1) material = { color: r.rgba32(), mainTextureIndex: r.u16(), ambientColor: r.vec4(), specularColor: r.vec4(), glossiness: r.f32(), rimColor: r.vec4(), rimAmount: r.f32(), rimThreshold: r.f32(), outlineThickness: r.f32(), outlineColor: r.rgba32() };
     else if (shader === 2) material = { color: r.rgb24() };
-    return { shader, material };
+    return { shader, material, raw: r.bytes.slice(start, r.pos) };
 }
 
 function readNode(r) {
@@ -141,6 +149,7 @@ export function readEvmap(arrayBuffer) {
 // ------------------------------------------------------------------ write
 
 function writeMesh(w, m) {
+    if (m.raw) { w.bytesN(m.raw); return; }
     let f = m.features & ~MESH.PALETTE_UV & ~MESH.LIGHT_UV;
     if (m.normalBuffer && m.normalBuffer.length) f |= MESH.NORMALS; else f &= ~MESH.NORMALS;
     if (m.uvBuffer && m.uvBuffer.length) f |= MESH.UV; else f &= ~MESH.UV;
@@ -152,6 +161,7 @@ function writeMesh(w, m) {
 }
 
 function writeMaterial(w, m) {
+    if (m.raw) { w.bytesN(m.raw); return; }
     let f = MAT.COLOR;
     let f2 = 0;
     if (m.colorMapIndex !== undefined) f |= MAT.COLOR_MAP;
@@ -183,11 +193,21 @@ function writeNode(w, n) {
     if (f & NODE.COLLISION_LAYER) w.u32(n.collisionLayer);
 }
 
-// `m` uses the same shape readEvmap returns (only the parts an editor produces are supported:
-// plain materials, simple weapon spawns, team spawns, gradient sky).
+function writeMaterialEx(w, e) {
+    w.u8(e.shader);
+    if (e.raw) w.bytesN(e.raw);
+    else if (e.shader === 0) writeMaterial(w, e.material);
+    else if (e.shader !== 3) throw new Error(`cannot encode a shader ${e.shader} material without its original bytes`);
+}
+
+// `m` uses the same shape readEvmap returns. Supported: plain or extended materials (extended ones
+// other than shader 0 only with their original bytes), plain or extended weapon spawns, team
+// spawns, gradient sky. Meshes and materials with `raw` bytes are written verbatim.
 export function writeEvmap(m) {
     const w = new BinaryWriter();
     let features = F.GRADIENT_SKY | F.NO_LEGACY_AMBIENT | F.EXT;
+    if (m.materialsEx) features |= F.MATERIALS_EX;
+    if (m.weaponSpawnsEx) features |= F.WEAPON_SPAWNS_EX;
     if (m.hemisphereSkyColor) features |= F.HEMISPHERE;
     if (m.cameraPaths && m.cameraPaths.length) features |= F.CAMERA_PATHS;
     let ext = FX.TEAM_SPAWNS;
@@ -201,9 +221,15 @@ export function writeEvmap(m) {
     w.u8(3); w.u8(features); w.u8(ext);
     w.list(m.meshes, writeMesh);
     w.list(m.textures || [], (w, t) => { w.u8(t.format); w.u32(t.data.length); w.bytesN(t.data); });
-    w.list(m.materials, writeMaterial);
+    if (m.materialsEx) w.list(m.materialsEx, writeMaterialEx);
+    else w.list(m.materials, writeMaterial);
     writeNode(w, m.rootObject);
-    w.list(m.weaponSpawns || [], (w, p) => w.vec3(p));
+    if (m.weaponSpawnsEx) w.list(m.weaponSpawnsEx, (w, s) => {
+        const f = (s.features & 1) || s.spawnList > 255 ? 1 : 0;
+        w.u8(f); w.vec3(s.position);
+        if (f & 1) w.u32(s.spawnList); else w.u8(s.spawnList);
+    });
+    else w.list(m.weaponSpawns || [], (w, p) => w.vec3(p));
     w.list(m.playerSpawns || [], (w, s) => { w.vec4(s.position); w.u8((s.neutral ? 1 : 0) | (s.team1 ? 2 : 0) | (s.team2 ? 4 : 0)); });
     w.list(m.directionalLights || [], (w, l) => {
         let f = l.features & LIGHT.CASTS_SHADOW;

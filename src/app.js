@@ -7,7 +7,10 @@ import { compileDocument, generateCameraPaths } from './model/compile.js';
 import { generateNavNodes, navReport } from './model/navgen.js';
 import { buildBlockTriangles, blocksBounds } from './model/geometry.js';
 import { collect, remapIds, translate, rotateY, mirror, insert, replace, removeSelection, centreOf, toClipboardText, fromClipboardText } from './model/edit.js';
-import { writeEvmap } from './evmap/format.js';
+import { writeEvmap, readEvmap } from './evmap/format.js';
+import { importEvmap } from './model/importer.js';
+import { registerAsset, getAsset, docAsset, docBounds, modelBounds } from './model/assets.js';
+import { fileKey, putFile, getFile, pruneFiles } from './editor/filestore.js';
 
 const STORAGE_KEY = 'evio-map-editor:doc';
 const OLD_STORAGE_KEY = 'evmap-forge:doc';   // the editor's earlier name; migrated on load
@@ -43,8 +46,8 @@ const ICONS = {
     lock: svg('<rect x="3.5" y="7" width="9" height="6.5" rx="1"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/>'),
     unlock: svg('<rect x="3.5" y="7" width="9" height="6.5" rx="1"/><path d="M5.5 7V5a2.5 2.5 0 0 1 4.9-.7"/>'),
 };
-const KIND_LABEL = { block: 'Block', playerSpawns: 'Player spawn', weaponSpawns: 'Weapon spawn', teleporters: 'Teleporter', navNodes: 'Nav node', cameraPaths: 'Camera path', brCircle: 'Battle royale circle' };
-const KIND_COLOR = { playerSpawns: 'var(--spawn)', weaponSpawns: 'var(--weapon)', teleporters: 'var(--teleport)', navNodes: 'var(--nav)', cameraPaths: 'var(--camera)', brCircle: 'var(--teleport)' };
+const KIND_LABEL = { models: 'Map piece', block: 'Block', playerSpawns: 'Player spawn', weaponSpawns: 'Weapon spawn', teleporters: 'Teleporter', navNodes: 'Nav node', cameraPaths: 'Camera path', brCircle: 'Battle royale circle' };
+const KIND_COLOR = { models: '#8fa3b5', playerSpawns: 'var(--spawn)', weaponSpawns: 'var(--weapon)', teleporters: 'var(--teleport)', navNodes: 'var(--nav)', cameraPaths: 'var(--camera)', brCircle: 'var(--teleport)' };
 const SHAPE_LABEL = { box: 'Box', ramp: 'Ramp', stairs: 'Stairs', cylinder: 'Cylinder', 'wedge-corner': 'Corner wedge' };
 
 // ------------------------------------------------------------------ state
@@ -119,7 +122,14 @@ const viewport = new Viewport($('#viewport'), {
     onPlace(pos) { placePiece(pos); },
     onTransform(sel, t) {
         change((doc) => {
-            if (sel.kind === 'block') {
+            if (sel.kind === 'models') {
+                const m = doc.models.find((x) => x.id === sel.id);
+                if (!m) return;
+                m.position = t.position;
+                if (m.matrix) m.matrix.t = [t.position.x, t.position.y, t.position.z];
+                if (t.rotation) m.rotation = t.rotation;
+                if (t.scale) m.scale = t.scale;
+            } else if (sel.kind === 'block') {
                 const b = doc.blocks.find((x) => x.id === sel.id);
                 if (b) Object.assign(b, { position: t.position, rotation: t.rotation, size: t.size });
             } else if (sel.kind === 'brCircle') {
@@ -179,6 +189,7 @@ function selectAll() {
     const all = [];
     const add = (kind, items) => items.forEach((it) => { if (!it.hidden && !it.locked) all.push({ kind, id: it.id }); });
     add('block', state.doc.blocks);
+    add('models', state.doc.models || []);
     for (const k of ['playerSpawns', 'weaponSpawns', 'teleporters', 'navNodes']) add(k, state.doc[k]);
     selectMany(all);
 }
@@ -190,14 +201,15 @@ function copySelection() {
     const groups = collect(state.doc, selectedEditable());
     const n = Object.values(groups).reduce((s, l) => s + l.length, 0);
     if (!n) return null;
-    const text = toClipboardText(groups);
+    const text = toClipboardText(groups, state.doc.base?.key ?? null);
     try { localStorage.setItem(CLIP_KEY, text); } catch { /* storage off: system clipboard only */ }
     toast(`Copied ${n} item${n === 1 ? '' : 's'}`);
     return text;
 }
 function pasteText(text) {
-    let groups = fromClipboardText(text || '');
-    if (!groups) { try { groups = fromClipboardText(localStorage.getItem(CLIP_KEY) || ''); } catch { groups = null; } }
+    const baseKey = state.doc.base?.key ?? null;
+    let groups = fromClipboardText(text || '', baseKey);
+    if (!groups) { try { groups = fromClipboardText(localStorage.getItem(CLIP_KEY) || '', baseKey); } catch { groups = null; } }
     if (!groups) { toast('Nothing to paste: copy something in the editor first'); return; }
     const pasted = remapIds(groups);
     translate(pasted, { x: viewport.grid * 2, y: 0, z: viewport.grid * 2 });
@@ -242,8 +254,9 @@ function rotateSelection(degrees) {
 // Mirror copy: across the map's centre line (left↔right = x, front↔back = z), swapping team 1 and
 // team 2 spawns, for symmetrical maps. Flip: in place, about the selection's own centre.
 function mapCentre() {
-    if (!state.doc.blocks.length) return { x: 0, y: 0, z: 0 };
-    const { min, max } = blocksBounds(state.doc.blocks);
+    const box = docBounds(state.doc);
+    if (!box) return { x: 0, y: 0, z: 0 };
+    const { min, max } = box;
     return { x: (min[0] + max[0]) / 2, y: (min[1] + max[1]) / 2, z: (min[2] + max[2]) / 2 };
 }
 function mirrorCopy(axis) {
@@ -275,7 +288,7 @@ function setFlag(flag, value, list = selectedEditable()) {
     if (value) select(null);
 }
 function showAll() {
-    change((doc) => { for (const k of ['blocks', 'playerSpawns', 'weaponSpawns', 'teleporters', 'navNodes', 'cameraPaths']) for (const it of doc[k]) delete it.hidden; });
+    change((doc) => { for (const k of ['blocks', 'models', 'playerSpawns', 'weaponSpawns', 'teleporters', 'navNodes', 'cameraPaths']) for (const it of doc[k] || []) delete it.hidden; });
     toast('Everything is visible again');
 }
 function arrangeCard() {
@@ -412,7 +425,7 @@ function playMenuLoop() {
 // from the camera. R cycles through the spawns; falling into the kill zone returns to the last one.
 function startWalkTest() {
     const doc = state.doc;
-    if (!doc.blocks.some((b) => b.collision !== 'visual')) { toast('Nothing to walk on yet: add a solid block first'); return; }
+    if (!doc.blocks.some((b) => b.collision !== 'visual') && !(docAsset(doc) && (doc.models || []).some((m) => m.collide))) { toast('Nothing to walk on yet: add a solid block first'); return; }
     const spawns = doc.playerSpawns.map((s) => ({ position: { ...s.position }, yaw: s.yaw || 0 }));
     let idx = state.selection?.kind === 'playerSpawns' ? doc.playerSpawns.findIndex((s) => s.id === state.selection.id) : -1;
     if (idx < 0 && spawns.length) {
@@ -475,6 +488,7 @@ function setTool(tool, piece = null) {
 
 // ------------------------------------------------------------------ rendering panels
 function refresh() {
+    ensureBase(state.doc);
     viewport.sync(state.doc);
     state.selected = state.selected.filter(existsSel);
     if (state.selection && !existsSel(state.selection)) state.selection = state.selected[state.selected.length - 1] || null;
@@ -491,6 +505,7 @@ function refresh() {
 }
 
 function itemName(kind, item, index) {
+    if (kind === 'models') return item.name || `Map piece ${index + 1}`;
     if (kind === 'block') return `${SHAPE_LABEL[item.shape] || 'Block'} ${index + 1}`;
     if (kind === 'playerSpawns') return `${item.team === 'team1' ? 'Team 1 spawn' : item.team === 'team2' ? 'Team 2 spawn' : 'Spawn'} ${index + 1}`;
     return `${KIND_LABEL[kind]} ${index + 1}`;
@@ -543,6 +558,17 @@ function renderOutliner() {
     doc.cameraPaths.forEach((s, i) => entry('cameraPaths', s, i));
     if (doc.brCircle) entry('brCircle', { id: 'brCircle' }, 0);
     doc.blocks.forEach((b, i) => entry('block', b, i));
+    // An opened map's own pieces, folded away by default (official maps have up to ~1,000).
+    const models = doc.models || [];
+    if (models.length) {
+        const open = state.piecesOpen || models.length <= 40;
+        const head = el('li', { class: 'group-head', title: 'Pieces of the opened map: click to show or hide the list' },
+            el('span', { class: 'caret' }, open ? '▾' : '▸'), el('span', { class: 'name' }, `Map pieces (${models.length})`));
+        head.addEventListener('click', () => { state.piecesOpen = !open; renderOutliner(); });
+        ul.appendChild(head);
+        if (open) models.forEach((m, i) => entry('models', m, i));
+        else total += models.length;
+    }
     $('#scene-count').textContent = total;
 }
 
@@ -580,6 +606,13 @@ function selectField(label, value, options, onCommit) {
     sel.addEventListener('change', () => onCommit(sel.value));
     return el('label', { class: 'field', for: id }, el('span', {}, label), sel);
 }
+function textField(label, value, onCommit) {
+    const id = `f${fieldSeq++}`;
+    const input = el('input', { type: 'text', id, value, spellcheck: 'false' });
+    input.addEventListener('change', () => onCommit(input.value.trim()));
+    return el('label', { class: 'field', for: id }, el('span', {}, label), input);
+}
+const roundVec = (v) => ({ x: round(v.x), y: round(v.y), z: round(v.z) });
 function checkField(label, value, onCommit) {
     const input = el('input', { type: 'checkbox', checked: !!value });
     input.addEventListener('change', () => onCommit(input.checked));
@@ -631,7 +664,24 @@ function renderInspector() {
     const index = kind === 'brCircle' ? 0 : listFor(kind).indexOf(item);
     root.append(el('h3', {}, el('span', { class: 'dot' }), itemName(kind, item, index)));
 
-    if (kind === 'block') {
+    if (kind === 'models') {
+        root.append(textField('Name', item.name || '', (v) => editSelected((m) => { m.name = v.slice(0, 120); })));
+        root.append(vecField('Position', item.position, (v) => editSelected((m) => { m.position = v; if (m.matrix) m.matrix.t = [v.x, v.y, v.z]; })));
+        if (item.matrix) {
+            root.append(el('p', { class: 'empty' }, 'This piece is skewed (a stretch under a turned parent in the original map), so it can be moved, turned 90° and mirrored but not rotated or resized freely.'));
+        } else {
+            root.append(vecField('Rotation (degrees)', roundVec(item.rotation), (v) => editSelected((m) => { m.rotation = v; }), 15));
+            root.append(vecField('Scale', roundVec(item.scale), (v) => editSelected((m) => { m.scale = v; }), 0.1));
+        }
+        root.append(checkField('Drawn', item.render, (v) => editSelected((m) => { m.render = v; })));
+        root.append(checkField('Players collide with it', item.collide, (v) => editSelected((m) => { m.collide = v; if (v && !((m.collisionLayer ?? 1) & 9)) m.collisionLayer = 1; })));
+        if (item.render) root.append(checkField('Casts shadows', item.shadows, (v) => editSelected((m) => { m.shadows = v; })));
+        const asset = docAsset(state.doc);
+        const mesh = asset && asset.meshes[item.mesh];
+        const tris = mesh ? mesh.submeshes.reduce((s, sm) => s + sm.indexBuffer.length / 3, 0) : 0;
+        const twins = (state.doc.models || []).filter((m) => m.mesh === item.mesh).length;
+        root.append(el('p', { class: 'empty' }, `${tris.toLocaleString()} triangles${twins > 1 ? ` · the same shape is used ${twins} times` : ''}${item.collide && !((item.collisionLayer ?? 1) & 9) ? ' · its collision layer only stops bullets and other objects, not players' : ''}. From ${state.doc.base?.file || 'the opened map'}.`));
+    } else if (kind === 'block') {
         root.append(selectField('Shape', item.shape, Object.entries(SHAPE_LABEL), (v) => editSelected((b) => { b.shape = v; if (v === 'stairs') b.steps ??= 6; if (v === 'cylinder') b.segments ??= 16; })));
         root.append(vecField('Position (centre)', item.position, (v) => editSelected((b) => { b.position = v; })));
         root.append(vecField('Size', item.size, (v) => editSelected((b) => { b.size = { x: Math.max(0.05, v.x), y: Math.max(0.05, v.y), z: Math.max(0.05, v.z) }; })));
@@ -780,6 +830,7 @@ function renderEnvironment() {
 
 function renderChecklist() {
     const issues = validate(state.doc);
+    if (state.doc.base && !docAsset(state.doc)) issues.unshift({ level: 'error', text: `The original map file (${state.doc.base.file}) is not loaded, so its pieces are not shown and the map cannot be exported. Open that .evmap again.` });
     if (state.doc.navNodes.length) {
         const nav = navReport(state.doc);
         if (nav.unreachableSpawns.length) issues.push({ level: 'warn', text: `Bots cannot reach ${spawnNames(nav.unreachableSpawns)} (no nav node nearby in the main area).` });
@@ -798,8 +849,11 @@ function renderChecklist() {
     if (!issues.length) ul.append(el('li', { class: 'ok' }, 'Everything on ev.io’s submission checklist is covered.'));
     for (const i of issues) ul.append(el('li', { class: i.level }, i.text));
     root.append(ul);
-    const tris = state.doc.blocks.reduce((s, b) => s + buildBlockTriangles(b).positions.length / 9, 0);
+    const asset = docAsset(state.doc);
+    const modelTris = asset ? (state.doc.models || []).reduce((s, m) => s + (asset.meshes[m.mesh]?.submeshes.reduce((t, sm) => t + sm.indexBuffer.length / 3, 0) || 0), 0) : 0;
+    const tris = modelTris + state.doc.blocks.reduce((s, b) => s + buildBlockTriangles(b).positions.length / 9, 0);
     root.append(el('dl', { class: 'stat-grid' },
+        ...(state.doc.base ? [el('dt', {}, 'Opened from'), el('dd', {}, state.doc.base.file), el('dt', {}, 'Map pieces'), el('dd', {}, (state.doc.models || []).length)] : []),
         el('dt', {}, 'Blocks'), el('dd', {}, state.doc.blocks.length),
         el('dt', {}, 'Triangles'), el('dd', {}, tris.toLocaleString()),
         el('dt', {}, 'Player spawns'), el('dd', {}, state.doc.playerSpawns.length),
@@ -827,7 +881,63 @@ function saveProject() {
     download(JSON.stringify(state.doc, null, 1), `${slug(state.doc.name)}.mapproject.json`, 'application/json');
     toast('Project saved');
 }
+// ------------------------------------------------------------------ opening .evmap files
+// Opening an .evmap makes a new map from it: its pieces become editable models, its spawns, weapons,
+// teleporters, nav nodes, camera paths, lights and sky become the editor's own. The file itself is
+// kept in the browser, so a reload shows its pieces again. Opening the file a project was made
+// from (when it is missing, e.g. on another computer) just reattaches it.
+const baseLoads = new Map();
+function ensureBase(doc) {
+    const key = doc.base?.key;
+    if (!key || getAsset(key) || baseLoads.has(key)) return;
+    baseLoads.set(key, getFile(key).then((rec) => {
+        if (!rec) { renderChecklist(); return; }
+        registerAsset(key, readEvmap(rec.bytes.buffer.slice(rec.bytes.byteOffset, rec.bytes.byteOffset + rec.bytes.byteLength)));
+        if (state.doc.base?.key === key) refresh();
+    }).catch(() => {}));
+}
+// Where the game is played: the spawns' extent plus a margin (official maps carry backdrop scenery
+// hundreds of metres across, which would put the view deep in the fog).
+function playArea(doc) {
+    const ps = doc.playerSpawns.map((s) => s.position);
+    if (ps.length < 2) return docBounds(doc);
+    const m = 12;
+    return { min: [Math.min(...ps.map((p) => p.x)) - m, Math.min(...ps.map((p) => p.y)), Math.min(...ps.map((p) => p.z)) - m],
+        max: [Math.max(...ps.map((p) => p.x)) + m, Math.max(...ps.map((p) => p.y)) + 4, Math.max(...ps.map((p) => p.z)) + m] };
+}
+async function openEvmap(file) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let parsed;
+    try { parsed = readEvmap(bytes.buffer); } catch { toast('That file is not an .evmap map, or it is damaged.'); return; }
+    const key = await fileKey(bytes);
+    registerAsset(key, parsed);
+    if (state.doc.base?.key === key) {
+        refresh();
+        toast(`Reattached ${file.name}`);
+    } else {
+        const name = file.name.replace(/\.evmap$/i, '').replace(/[_-]+/g, ' ').trim() || 'Opened map';
+        const { doc, report } = importEvmap(parsed, { key, name });
+        doc.base.file = file.name;
+        state.undo.push(JSON.stringify(state.doc));
+        state.redo = [];
+        state.doc = doc;
+        state.selection = null;
+        state.selected = [];
+        state.piecesOpen = false;
+        refresh();
+        viewport.frameBox(playArea(doc));
+        const dropped = report.dropped.length ? ` Not kept: ${report.dropped.join(', ')}.` : '';
+        toast(`Opened ${file.name}: ${report.models} pieces, ${report.triangles.toLocaleString()} triangles, ${doc.playerSpawns.length} spawns.${dropped}`, 6000);
+    }
+    const kept = await putFile(key, bytes, file.name);
+    if (!kept) toast('This browser could not keep a copy of the map file: after a reload, open it again to see its pieces.', 7000);
+    // Keep only files the map, or its undo history, still uses.
+    const inUse = new Set([key]);
+    for (const s of [...state.undo, ...state.redo]) for (const m of s.matchAll(/"key":"(sha256:[0-9a-f]+)"/g)) inUse.add(m[1]);
+    pruneFiles([...inUse]);
+}
 function openProject(file) {
+    if (/\.evmap$/i.test(file.name)) { openEvmap(file); return; }
     const reader = new FileReader();
     reader.onload = () => {
         try {
@@ -859,7 +969,7 @@ function openExport() {
             el('dt', {}, 'File size'), el('dd', {}, mb >= 0.1 ? `${mb.toFixed(2)} MB` : `${(bytes.length / 1024).toFixed(1)} KB`),
             el('dt', {}, 'Objects (after merging)'), el('dd', {}, compiled.rootObject.children.length),
             el('dt', {}, 'Triangles'), el('dd', {}, tris.toLocaleString()),
-            el('dt', {}, 'Materials'), el('dd', {}, compiled.materials.length)));
+            el('dt', {}, 'Materials'), el('dd', {}, (compiled.materialsEx || compiled.materials).length)));
         if (mb > 10) issues.unshift({ level: 'error', text: 'Over ev.io’s 10 MB map limit.' });
         $('#export-download').disabled = false;
     } catch (e) {
@@ -964,12 +1074,12 @@ function spawnNames(indices) {
 
 // ------------------------------------------------------------------ toast
 let toastTimer;
-function toast(text) {
+function toast(text, ms = 2200) {
     const t = $('#toast');
     t.textContent = text;
     t.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+    toastTimer = setTimeout(() => t.classList.remove('show'), ms);
 }
 
 // ------------------------------------------------------------------ wiring
@@ -1017,6 +1127,7 @@ function bindUi() {
     $('#frame-save').addEventListener('click', () => viewport.endFraming(true));
     $('#frame-cancel').addEventListener('click', () => viewport.endFraming(false));
     $('#work-light').addEventListener('change', (e) => viewport.setWorkLight(e.target.checked));
+    $('#show-invisible').addEventListener('change', (e) => { viewport.showInvisible = e.target.checked; viewport.sync(state.doc); });
     $('#images-view').addEventListener('change', () => renderImages().catch((e) => toast(`Could not render the images: ${e.message}`)));
     $('#download-thumb').addEventListener('click', () => downloadImage('thumb'));
     $('#download-large').addEventListener('click', () => downloadImage('large'));

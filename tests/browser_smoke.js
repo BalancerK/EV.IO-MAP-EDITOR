@@ -349,6 +349,61 @@ async function main() {
 
     const img = await send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync(shot, Buffer.from(img.result.data, 'base64'));
+
+    // ---- item 6: open an official map (.evmap) through the real file picker
+    const officialMap = process.env.EVIO_TEST_MAP || path.join(serverDir, 'map_cache', 'HUT8Bishop.evmap');
+    if (!fs.existsSync(officialMap)) console.log(`(no ${officialMap}: skipping the open-.evmap checks)`);
+    else {
+        await evaluate(`document.querySelectorAll('dialog[open]').forEach((d) => d.close())`);
+        const { root } = (await send('DOM.getDocument')).result;
+        const { nodeId } = (await send('DOM.querySelector', { nodeId: root.nodeId, selector: '#file-input' })).result;
+        await send('DOM.setFileInputFiles', { nodeId, files: [path.resolve(officialMap)] });
+        let pieces = 0;
+        for (let i = 0; i < 60 && !pieces; i++) { await sleep(250); pieces = await evaluate(`window.__mapEditor.viewport.modelObjects.size`); }
+        const od = await evaluate(`(() => { const d = window.__mapEditor.state.doc; return { models: d.models.length, spawns: d.playerSpawns.length, nav: d.navNodes.length, blocks: d.blocks.length, base: d.base && d.base.file, name: d.name }; })()`);
+        check(od.models > 50 && pieces === od.models && od.base === path.basename(officialMap), `Open .evmap shows the map's pieces (${pieces} of ${od.models}, "${od.name}")`);
+        check(od.spawns > 10 && od.nav > 50 && od.blocks === 0, `its spawns and nav nodes become editable (${od.spawns} spawns, ${od.nav} nav nodes)`);
+        await sleep(1500);   // textures
+        const imgO = await send('Page.captureScreenshot', { format: 'png' });
+        fs.writeFileSync(shot.replace(/\.png$/, '-opened.png'), Buffer.from(imgO.result.data, 'base64'));
+        // Click the middle of the view: it should pick a piece of the map.
+        await evaluate(`window.__mapEditor.viewport.frameBox && 0`);
+        const vpRect = await evaluate(`(() => { const r = document.querySelector('#viewport').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+        await click(vpRect.x, vpRect.y);
+        const picked = await evaluate(`window.__mapEditor.state.selection`);
+        check(picked && picked.kind === 'models', `clicking the map selects one of its pieces (${picked && picked.kind})`);
+        // Move it up 3 m through the inspector, and check the export.
+        if (picked && picked.kind === 'models') {
+            const before = await evaluate(`window.__mapEditor.state.doc.models.find((m) => m.id === ${JSON.stringify(picked.id)}).position`);
+            await evaluate(`(() => { const i = document.querySelector('#inspector [aria-label="Position y"]'); i.value = String(${before.y} + 3); i.dispatchEvent(new Event('change')); })()`);
+            await sleep(200);
+            const objY = await evaluate(`window.__mapEditor.viewport.modelObjects.get(${JSON.stringify(picked.id)}).position.y`);
+            check(Math.abs(objY - before.y - 3) < 1e-3, 'editing the position moves the piece in the view');
+        }
+        const out = await evaluate(`(async () => {
+            const { compileDocument } = await import('/src/model/compile.js');
+            const { writeEvmap } = await import('/src/evmap/format.js');
+            const bytes = writeEvmap(compileDocument(window.__mapEditor.state.doc));
+            let s = ''; for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)); return btoa(s);
+        })()`);
+        const ob = Buffer.from(out, 'base64');
+        const orig = fs.readFileSync(officialMap);
+        const require2 = createRequire(import.meta.url);
+        const bpw2 = require2(`${serverDir}/physics_world.js`);
+        const ga = bpw2.parseEvmapBuffer(orig, 'orig'), gb = bpw2.parseEvmapBuffer(ob, 'export');
+        check(ga.indices.length === gb.indices.length && ga.spawns.length === gb.spawns.length, `the edited map exports with all its collision (${gb.indices.length / 3} triangles) and spawns`);
+        // Walk test on the opened map.
+        await press('#btn-walk');
+        await sleep(2500);
+        const wp = await evaluate(`(() => { const w = window.__mapEditor.viewport.walk; return w ? { grounded: w.player.grounded, y: w.player.pos.y } : null; })()`);
+        check(wp && wp.grounded && wp.y > -29, `the walk test stands on the opened map (feet at ${wp && wp.y.toFixed(2)})`);
+        await keyPress('Escape', 'Escape', 27);
+        // Reload: the map file comes back from the browser's storage.
+        await send('Page.reload');
+        let back = 0;
+        for (let i = 0; i < 60 && !back; i++) { await sleep(250); back = await evaluate(`window.__mapEditor ? window.__mapEditor.viewport.modelObjects.size : 0`); }
+        check(back === pieces, `after a reload the pieces come back without opening the file again (${back})`);
+    }
     check(errors.length === 0, `no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
     console.log('screenshot:', shot);
     ws.close();

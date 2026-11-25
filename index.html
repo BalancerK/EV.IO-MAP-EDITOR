@@ -13,7 +13,8 @@
     {
         "imports": {
             "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+            "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.7.3/build/index.module.js"
         }
     }
     </script>
@@ -27,7 +28,7 @@
         <input id="map-name" class="map-name" type="text" spellcheck="false" aria-label="Map name">
         <nav class="file-actions" aria-label="File">
             <button id="btn-new" type="button">New</button>
-            <button id="btn-open" type="button">Open</button>
+            <button id="btn-open" type="button" title="Open a saved project (.mapproject.json) or any ev.io map (.evmap)">Open</button>
             <button id="btn-save" type="button" title="Save the project as a .json file you can open again (Ctrl+S)">Save project</button>
             <span class="sep" aria-hidden="true"></span>
             <button id="btn-undo" type="button" title="Undo (Ctrl+Z)">Undo</button>
@@ -37,7 +38,7 @@
             <button id="btn-images" type="button" title="Export the thumbnail and large image ev.io's map upload form asks for">Export images</button>
             <button id="btn-export" type="button" class="primary" title="Export the map as an .evmap file for ev.io">Export .evmap</button>
         </nav>
-        <input id="file-input" type="file" accept=".json,application/json" hidden>
+        <input id="file-input" type="file" accept=".json,application/json,.evmap" hidden>
     </header>
 
     <main class="workspace">
@@ -54,6 +55,7 @@
                     <button type="button" data-gizmo="scale" title="Resize (R)">Size</button>
                 </div>
                 <label class="check" title="Brightens the view while you build. The game, exports and images never use it."><input id="work-light" type="checkbox"> Work light (editor only)</label>
+                <label class="check" title="Invisible walls collide but are never drawn in game. Hide them here to see the map as players do."><input id="show-invisible" type="checkbox" checked> Show invisible walls</label>
                 <label class="field inline">
                     <span>Grid</span>
                     <select id="grid-size">

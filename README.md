@@ -22,6 +22,11 @@ server (for example `python -m http.server`) and open `index.html`.
 - **Gameplay objects**: free-for-all and team spawns with facing, weapon spawns, teleporters with
   links (placing one right after another pairs them), bot nav nodes (chained as you place them),
   battle royale circle.
+- **Open any .evmap**: official maps, community maps or your own exports. Every piece of the map
+  becomes something you can select, move, turn, resize, mirror, hide or delete, and its spawns,
+  weapon spawns, teleporters, nav nodes, camera paths, lights and sky become editable like the
+  editor's own. Its meshes, materials and textures are written back byte for byte, so an untouched
+  map exports exactly as it was. The file is kept in your browser, so a reload brings it back.
 - **Walk test**: play the map in first person (button or **P**) with ev.io's own movement numbers:
   walking and sprint speed, acceleration, air control, gravity, jump height and double jump, the
   player's size and step-up height, teleporters and the kill zone. Check that every jump can be
@@ -84,6 +89,7 @@ node tests/test_compile.js                            # shapes, winding, camera 
 node tests/test_edit.js                               # selection, copy/paste, mirror
 node tests/test_navgen.js                             # bot nav generation, server pathfinder
 node tests/test_walk.js                               # walk-test movement and collision
+node tests/test_import.js [maps...]                   # open -> export -> compare real .evmap files
 python -m http.server 8765 --bind 127.0.0.1           # then, in another terminal:
 node tests/browser_smoke.js                           # real mouse events in headless Chrome
 ```
