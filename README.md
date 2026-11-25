@@ -58,3 +58,7 @@ The tests also load each result with the
 [EV.IO custom server](https://github.com/BalancerK/EV.IO-Custom-Server)'s independent `.evmap`
 parser and physics builder. They expect a checkout of it next to this one
 (`../EV.IO-Custom-Server`); point `EVIO_SERVER_DIR` elsewhere if yours lives somewhere else.
+
+## License
+
+[MIT](LICENSE)
