@@ -33,6 +33,7 @@
             <button id="btn-undo" type="button" title="Undo (Ctrl+Z)">Undo</button>
             <button id="btn-redo" type="button" title="Redo (Ctrl+Y)">Redo</button>
             <span class="sep" aria-hidden="true"></span>
+            <button id="btn-images" type="button" title="Make the thumbnail and large image ev.io's upload form asks for">Upload images</button>
             <button id="btn-export" type="button" class="primary" title="Export the map as an .evmap file for ev.io">Export .evmap</button>
         </nav>
         <input id="file-input" type="file" accept=".json,application/json" hidden>
@@ -110,6 +111,30 @@
             <div class="dialog-actions">
                 <button value="cancel" type="submit">Close</button>
                 <button id="export-download" value="download" type="submit" class="primary">Download</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="images-dialog" class="dialog dialog-wide">
+        <form method="dialog">
+            <h2>Upload images</h2>
+            <p class="empty">ev.io's map upload form asks for a small thumbnail (shown in Create Game) and a large image (shown while the map loads). Both are rendered from your map without the editor's grid and markers.</p>
+            <label class="field" for="images-view">
+                <span>View from</span>
+                <select id="images-view"></select>
+            </label>
+            <figure class="still">
+                <figcaption><strong>Large image</strong> <span class="mono">2000 × 902 JPEG</span> <span id="large-size" class="mono dim"></span></figcaption>
+                <img id="large-preview" alt="Large image preview">
+            </figure>
+            <figure class="still">
+                <figcaption><strong>Thumbnail</strong> <span class="mono">166 × 70 PNG</span> <span id="thumb-size" class="mono dim"></span></figcaption>
+                <img id="thumb-preview" class="thumb" alt="Thumbnail preview">
+            </figure>
+            <div class="dialog-actions">
+                <button value="cancel" type="submit">Close</button>
+                <button id="download-thumb" type="button">Download thumbnail</button>
+                <button id="download-large" type="button" class="primary">Download large image</button>
             </div>
         </form>
     </dialog>

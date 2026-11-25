@@ -22,11 +22,16 @@ server (for example `python -m http.server`) and open `index.html`.
 - **Checklist**: ev.io's submission checklist, run live (spawns, collision, lights, kill zone at
   y = −30, ...).
 
+- **Upload images**: renders the 166×70 PNG thumbnail and the 2000×902 JPEG large image that
+  ev.io's upload form asks for, from the current view or any menu camera path, without the
+  editor's grid and markers.
+
 Projects save as `.mapproject.json` (and autosave in the browser). **Export .evmap** writes the game file.
 
 ## Submitting to ev.io
 
-Upload at <https://ev.io/node/add/map> with a 166×70 PNG thumbnail and a 2000×902 JPEG large image.
+Upload at <https://ev.io/node/add/map> with a 166×70 PNG thumbnail and a 2000×902 JPEG large image
+(the editor's **Upload images** button makes both).
 Until ev.io staff approve a map, only its author can play it from custom server.
 
 ## Playing community maps on the custom server

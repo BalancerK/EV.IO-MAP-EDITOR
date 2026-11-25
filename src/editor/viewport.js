@@ -64,6 +64,7 @@ export class Viewport {
         kill.rotation.x = -Math.PI / 2;
         kill.position.y = KILL_Y;
         scene.add(kill);
+        this.killPlane = kill;
         this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 
         this.hemi = new THREE.HemisphereLight(0xabd4ff, 0xbb9e8c, 0.3);
@@ -383,6 +384,58 @@ export class Viewport {
         const hit = this.surfaceHit();
         const pos = this.placementFor(hit);
         if (pos) this.cb.onPlace(pos, hit);
+    }
+
+    // ------------------------------------------------------------------ still images
+    // Render the map (without editor-only helpers) to a canvas of the given size, from `pose`
+    // ({ position, yaw, pitch }, the camera-path convention) or, when omitted, the current view.
+    // `supersample` renders larger and scales down, which keeps small images crisp.
+    renderStill(width, height, pose = null, supersample = 1) {
+        const w = Math.round(width * supersample), h = Math.round(height * supersample);
+        const cam = new THREE.PerspectiveCamera(this.camera.fov, w / h, 0.1, this.camera.far);
+        if (pose) {
+            cam.position.set(pose.position.x, pose.position.y, pose.position.z);
+            cam.rotation.set(deg(pose.pitch || 0), deg(pose.yaw || 0), 0, 'YXZ');
+        } else {
+            cam.position.copy(this.camera.position);
+            cam.quaternion.copy(this.camera.quaternion);
+        }
+        cam.updateMatrixWorld();
+
+        const helpers = [this.gridHelper, this.killPlane, this.gizmo, this.selectionBox, this.ghost, this.objectRoot];
+        const wasVisible = helpers.map((o) => o.visible);
+        helpers.forEach((o) => { o.visible = false; });
+        const skyPos = this.sky.position.clone();
+        this.sky.position.copy(cam.position);
+        const target = new THREE.WebGLRenderTarget(w, h, { samples: 4, colorSpace: THREE.SRGBColorSpace });
+        const pixels = new Uint8Array(w * h * 4);
+        try {
+            this.renderer.setRenderTarget(target);
+            this.renderer.render(this.scene, cam);
+            this.renderer.readRenderTargetPixels(target, 0, 0, w, h, pixels);
+        } finally {
+            this.renderer.setRenderTarget(null);
+            target.dispose();
+            helpers.forEach((o, i) => { o.visible = wasVisible[i]; });
+            this.sky.position.copy(skyPos);
+        }
+
+        // WebGL rows run bottom-up; canvas rows top-down.
+        const full = document.createElement('canvas');
+        full.width = w; full.height = h;
+        const fctx = full.getContext('2d');
+        const img = fctx.createImageData(w, h);
+        const row = w * 4;
+        for (let y = 0; y < h; y++) img.data.set(pixels.subarray((h - 1 - y) * row, (h - y) * row), y * row);
+        fctx.putImageData(img, 0, 0);
+        if (supersample === 1) return full;
+        const out = document.createElement('canvas');
+        out.width = width; out.height = height;
+        const octx = out.getContext('2d');
+        octx.imageSmoothingEnabled = true;
+        octx.imageSmoothingQuality = 'high';
+        octx.drawImage(full, 0, 0, width, height);
+        return out;
     }
 
     // ------------------------------------------------------------------ camera helpers

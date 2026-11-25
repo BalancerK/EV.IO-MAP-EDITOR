@@ -120,6 +120,35 @@ async function main() {
     const built = bpw.buildWorldFromEvmapBuffer(bytes, 'smoke');
     check(!!built.world && built.spawns.length === 2, 'server builds a physics world from the browser export');
 
+    // Upload images: exact sizes and formats, real content (not a blank frame), view switching.
+    await evaluate(`document.querySelector('#export-dialog').close()`);
+    await press('#btn-images');
+    await sleep(1500);
+    const stills = await evaluate(`(async () => {
+        const info = async (id) => {
+            const img = document.querySelector(id);
+            if (!img.complete || !img.naturalWidth) await new Promise((r) => img.addEventListener('load', r, { once: true }));
+            const blob = await (await fetch(img.src)).blob();
+            const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
+            const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+            const d = g.getImageData(0, 0, c.width, c.height).data;
+            const seen = new Set(); for (let i = 0; i < d.length; i += 4 * 97) seen.add((d[i] >> 3) + ',' + (d[i + 1] >> 3) + ',' + (d[i + 2] >> 3));
+            return { w: img.naturalWidth, h: img.naturalHeight, type: blob.type, bytes: blob.size, colours: seen.size };
+        };
+        return { large: await info('#large-preview'), thumb: await info('#thumb-preview') };
+    })()`);
+    check(stills.large.w === 2000 && stills.large.h === 902 && stills.large.type === 'image/jpeg', `large image is 2000x902 JPEG (${JSON.stringify(stills.large)})`);
+    check(stills.thumb.w === 166 && stills.thumb.h === 70 && stills.thumb.type === 'image/png', `thumbnail is 166x70 PNG (${JSON.stringify(stills.thumb)})`);
+    check(stills.large.colours > 20 && stills.thumb.colours > 10, 'both images show the map, not a blank frame');
+    const firstSrc = await evaluate(`document.querySelector('#large-preview').src`);
+    await evaluate(`(() => { const s = document.querySelector('#images-view'); s.value = 'view'; s.dispatchEvent(new Event('change')); })()`);
+    await sleep(1500);
+    check((await evaluate(`document.querySelector('#large-preview').src`)) !== firstSrc, 'changing the view re-renders the images');
+    const stillShot = path.join(path.dirname(shot), 'evio-map-editor-large.jpg');
+    const largeB64 = await evaluate(`(async () => { const b = await (await fetch(document.querySelector('#large-preview').src)).blob(); const a = new Uint8Array(await b.arrayBuffer()); let s = ''; for (const x of a) s += String.fromCharCode(x); return btoa(s); })()`);
+    fs.writeFileSync(stillShot, Buffer.from(largeB64, 'base64'));
+    console.log('large image:', stillShot);
+
     const img = await send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync(shot, Buffer.from(img.result.data, 'base64'));
     check(errors.length === 0, `no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);

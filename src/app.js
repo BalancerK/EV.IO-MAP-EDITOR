@@ -577,6 +577,61 @@ function openExport() {
     $('#export-dialog').showModal();
 }
 
+// ------------------------------------------------------------------ upload images
+// ev.io's upload form (ev.io/node/add/map) wants a 166×70 PNG thumbnail and a 2000×902 JPEG large
+// image. Both are rendered from the map itself; the thumbnail is supersampled 4× so it stays crisp.
+const IMAGE_SPECS = {
+    large: { width: 2000, height: 902, type: 'image/jpeg', quality: 0.9, ext: 'jpg', supersample: 1 },
+    thumb: { width: 166, height: 70, type: 'image/png', ext: 'png', supersample: 4 },
+};
+const images = { large: null, thumb: null };
+
+function imageViews() {
+    const views = [{ value: 'view', label: 'The current view', pose: null }];
+    state.doc.cameraPaths.forEach((c, i) => {
+        views.push({ value: `cam${i}s`, label: `Camera path ${i + 1}, start`, pose: c.start });
+        views.push({ value: `cam${i}e`, label: `Camera path ${i + 1}, end`, pose: c.end });
+    });
+    return views;
+}
+
+function canvasToBlob(canvas, spec) {
+    return new Promise((resolve) => canvas.toBlob(resolve, spec.type, spec.quality));
+}
+
+async function renderImages() {
+    const views = imageViews();
+    const chosen = views.find((v) => v.value === $('#images-view').value) || views[0];
+    for (const key of ['large', 'thumb']) {
+        const spec = IMAGE_SPECS[key];
+        const canvas = viewport.renderStill(spec.width, spec.height, chosen.pose, spec.supersample);
+        const blob = await canvasToBlob(canvas, spec);
+        if (images[key]) URL.revokeObjectURL(images[key].url);
+        images[key] = { blob, url: URL.createObjectURL(blob) };
+        $(`#${key}-preview`).src = images[key].url;
+        $(`#${key}-size`).textContent = blob.size >= 1024 * 1024 ? `${(blob.size / 1048576).toFixed(2)} MB` : `${Math.round(blob.size / 1024)} KB`;
+    }
+}
+
+function openImages() {
+    const sel = $('#images-view');
+    const previous = sel.value;
+    sel.textContent = '';
+    const views = imageViews();
+    for (const v of views) sel.append(el('option', { value: v.value }, v.label));
+    // Default to the first camera path's start: it is the view players get in the menu.
+    sel.value = views.some((v) => v.value === previous) ? previous : (views[1]?.value || 'view');
+    $('#images-dialog').showModal();
+    renderImages().catch((e) => toast(`Could not render the images: ${e.message}`));
+}
+
+function downloadImage(key) {
+    const img = images[key];
+    if (!img) return;
+    const spec = IMAGE_SPECS[key];
+    download(img.blob, `${slug(state.doc.name)}-${key === 'large' ? 'large' : 'thumbnail'}-${spec.width}x${spec.height}.${spec.ext}`, spec.type);
+}
+
 // ------------------------------------------------------------------ toast
 let toastTimer;
 function toast(text) {
@@ -625,6 +680,10 @@ function bindUi() {
     $('#btn-undo').addEventListener('click', undo);
     $('#btn-redo').addEventListener('click', redo);
     $('#btn-export').addEventListener('click', openExport);
+    $('#btn-images').addEventListener('click', openImages);
+    $('#images-view').addEventListener('change', () => renderImages().catch((e) => toast(`Could not render the images: ${e.message}`)));
+    $('#download-thumb').addEventListener('click', () => downloadImage('thumb'));
+    $('#download-large').addEventListener('click', () => downloadImage('large'));
     $('#export-download').addEventListener('click', () => { if (lastExport) { download(lastExport, `${slug(state.doc.name)}.evmap`, 'application/octet-stream'); toast('Exported .evmap'); } });
 
     window.addEventListener('keydown', (e) => {
