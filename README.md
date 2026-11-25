@@ -26,9 +26,8 @@ Projects save as `.mapproject.json` (and autosave in the browser). **Export .evm
 
 ## Submitting to ev.io
 
-Upload at <https://ev.io/node/add/map> with a 166×70 PNG thumbnail and a 1000×451 JPEG large image.
-Until ev.io staff approve a map, only its author can play it, against bots, from
-Create Game → My maps.
+Upload at <https://ev.io/node/add/map> with a 166×70 PNG thumbnail and a 2000×902 JPEG large image.
+Until ev.io staff approve a map, only its author can play it from custom server.
 
 ## How the file is made
 
