@@ -56,15 +56,16 @@ THREE.ShaderChunk.fog_fragment = `
     }
 }
 
-// The game loads this exact gradient (three.js's examples/textures/gradientMaps/threeTone.jpg) with
-// default filtering. Until it arrives, an equivalent three-step ramp stands in.
-const TOON_GRADIENT_URL = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/gradientMaps/threeTone.jpg';
-const toonGradient = new THREE.DataTexture(new Uint8Array([90, 90, 90, 255, 170, 170, 170, 255, 255, 255, 255, 255]), 3, 1);
+// The game's toon gradient is three.js's examples/textures/gradientMaps/threeTone.jpg, loaded with
+// default (linear) filtering. That image is 3 x 1 pixels of grey 64 / 128 / 255, so its pixels are
+// built in here rather than downloaded: no network race, the same shading on every load.
+// (Loading the image into a DataTexture used to fail at random: DataTexture uploads raw pixel data,
+// so whichever of the two reached the GPU first decided whether the map rendered lit or dark.)
+const toonGradient = new THREE.DataTexture(new Uint8Array([64, 64, 64, 255, 128, 128, 128, 255, 255, 255, 255, 255]), 3, 1);
+toonGradient.magFilter = THREE.LinearFilter;
+toonGradient.minFilter = THREE.LinearFilter;
+toonGradient.generateMipmaps = false;
 toonGradient.needsUpdate = true;
-new THREE.TextureLoader().load(TOON_GRADIENT_URL, (tex) => {
-    toonGradient.image = tex.image;
-    toonGradient.needsUpdate = true;
-}, undefined, () => { /* offline: keep the built-in ramp */ });
 
 export class Viewport {
     constructor(container, callbacks) {
