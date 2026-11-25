@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "maps": [
+    {
+      "nid": 830,
+      "title": "The Field",
+      "author": "BalancerK",
+      "evmapUrl": "https://ev.io/sites/default/files/maps/the-field_0.evmap",
+      "thumbUrl": "https://ev.io/sites/default/files/map_thumbs/Screenshot_202.png",
+      "largeImageUrl": "https://ev.io/sites/default/files/map_large_image/Screenshot_201.jpg",
+      "approvedForPrivateGames": false,
+      "updated": "2026-11-25T10:52:03+00:00"
+    }
+  ],
+  "updated": "2026-11-25T12:03:08.267Z"
+}

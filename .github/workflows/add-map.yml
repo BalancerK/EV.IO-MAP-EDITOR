@@ -1,0 +1,53 @@
+# Actions -> "Add ev.io map" -> Run workflow: adds (or refreshes, or removes) maps in
+# maps/extra-maps.json and commits the change; GitHub Pages republishes it within a minute or two,
+# and the custom server / extension pick it up on their next refresh.
+name: Add ev.io map
+
+on:
+  workflow_dispatch:
+    inputs:
+      nids:
+        description: "Map node id(s) from ev.io/node/<id>, space-separated (e.g. 830 831)"
+        required: true
+        type: string
+      action:
+        description: "add (also refreshes a re-uploaded map) or remove"
+        required: true
+        default: add
+        type: choice
+        options: [add, remove]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: extra-maps
+  cancel-in-progress: false
+
+jobs:
+  update-list:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Update maps/extra-maps.json
+        env:
+          NIDS: ${{ inputs.nids }}
+          ACTION: ${{ inputs.action }}
+        run: |
+          # Only digits and spaces reach the shell; anything else is refused.
+          if ! [[ "$NIDS" =~ ^[0-9\ ]+$ ]]; then echo "map ids must be numbers"; exit 1; fi
+          if [ "$ACTION" = "remove" ]; then node scripts/add_map.js --remove $NIDS; else node scripts/add_map.js $NIDS; fi
+      - name: Commit
+        env:
+          NIDS: ${{ inputs.nids }}
+          ACTION: ${{ inputs.action }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add maps/extra-maps.json
+          if git diff --cached --quiet; then echo "no change"; exit 0; fi
+          git commit -m "Map list: $ACTION $NIDS"
+          git push

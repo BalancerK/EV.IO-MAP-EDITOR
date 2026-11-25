@@ -29,6 +29,13 @@ Projects save as `.mapproject.json` (and autosave in the browser). **Export .evm
 Upload at <https://ev.io/node/add/map> with a 166×70 PNG thumbnail and a 2000×902 JPEG large image.
 Until ev.io staff approve a map, only its author can play it from custom server.
 
+## Playing community maps on the custom server
+
+[`maps/extra-maps.json`](maps/) is the shared list of extra ev.io maps that the EV.IO custom server
+and the EV.IO UI Enhancer extension add to their map lists. Uploaded a map to ev.io? Add its id
+with the **Add ev.io map** workflow (Actions tab) and it is playable there within minutes. See
+[maps/README.md](maps/README.md).
+
 ## How the file is made
 
 `src/evmap/format.js` reads and writes `.evmap` exactly as the ev.io client's own reader
