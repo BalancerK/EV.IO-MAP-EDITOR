@@ -65,6 +65,48 @@ export function cameraNodeRotation(yawDeg, pitchDeg) {
     return quatFromBasis(f, u);
 }
 
+// The shadow camera the game builds for the shadow-casting light, in GAME space: it sits back along
+// the light's direction from the map's centre and covers the whole map (the client uses
+// shadowSettings.position, far, halfWidth and halfHeight exactly like this). Shared by the exporter
+// and the editor's viewport so the preview's shadows fall where the game's will.
+export function shadowSettingsFor(doc) {
+    const { min, max } = doc.blocks.length ? blocksBounds(doc.blocks) : { min: [0, 0, 0], max: [0, 0, 0] };
+    const centre = { x: (min[0] + max[0]) / 2, y: (min[1] + max[1]) / 2, z: (min[2] + max[2]) / 2 };
+    const radius = Math.max(10, Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2);
+    const caster = doc.lights.find((l) => l.castsShadow) || doc.lights[0];
+    const direction = caster ? lightDirection(caster) : { x: 0, y: -1, z: 0 };
+    const position = { x: centre.x - direction.x * radius * 1.5, y: centre.y - direction.y * radius * 1.5, z: centre.z - direction.z * radius * 1.5 };
+    return { position, direction, centre, radius, far: radius * 3.5, halfWidth: radius, halfHeight: radius };
+}
+
+// Camera-path pose (position + yaw/pitch, the cameraForward convention) looking from `from` at `to`.
+export function poseLookingAt(from, to) {
+    const d = norm({ x: to.x - from.x, y: to.y - from.y, z: to.z - from.z });
+    const r = (v) => Math.round(v * 1000) / 1000;
+    const yaw = ((Math.atan2(-d.x, -d.z) / deg) % 360 + 360) % 360;
+    const pitch = Math.asin(Math.max(-1, Math.min(1, d.y))) / deg;
+    return { position: { x: r(from.x), y: r(from.y), z: r(from.z) }, yaw: r(yaw), pitch: r(pitch) };
+}
+
+// A starting set of menu-camera paths: `count` slow arcs circling the map, each looking at its
+// centre from outside and above it (ev.io maps usually have about six). Returns new cameraPaths.
+export function generateCameraPaths(doc, newId, count = 6, seconds = 25) {
+    const { min, max } = doc.blocks.length ? blocksBounds(doc.blocks) : { min: [-30, 0, -30], max: [30, 10, 30] };
+    const c = { x: (min[0] + max[0]) / 2, y: (min[1] + max[1]) / 2, z: (min[2] + max[2]) / 2 };
+    const span = Math.max(max[0] - min[0], max[2] - min[2], 20);
+    const distance = span * 0.75 + 8;
+    const height = max[1] + span * 0.35 + 4;
+    const look = { x: c.x, y: min[1] + (max[1] - min[1]) * 0.3, z: c.z };
+    const sweep = (360 / count) * 0.6;
+    const at = (a) => ({ x: c.x + Math.sin(a * deg) * distance, y: height, z: c.z + Math.cos(a * deg) * distance });
+    const paths = [];
+    for (let i = 0; i < count; i++) {
+        const a = (360 / count) * i + 15;
+        paths.push({ id: newId('cam'), start: poseLookingAt(at(a), look), end: poseLookingAt(at(a + sweep), look), seconds });
+    }
+    return paths;
+}
+
 // Merge blocks into meshes. Returns { meshes, nodes } in file space.
 function buildMeshes(doc, materialIndex) {
     const groups = new Map();
@@ -134,14 +176,8 @@ export function compileDocument(doc) {
     if (!meshes.length) throw new Error('The map has no geometry. Add at least one block.');
 
     const env = doc.environment;
-    const { min, max } = blocksBounds(doc.blocks);
-    const centre = { x: (min[0] + max[0]) / 2, y: (min[1] + max[1]) / 2, z: (min[2] + max[2]) / 2 };
-    const radius = Math.max(10, Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2);
-
     const lights = doc.lights.length ? doc.lights : [];
-    const caster = lights.find((l) => l.castsShadow) || lights[0];
-    const casterDir = caster ? lightDirection(caster) : { x: 0, y: -1, z: 0 };
-    const shadowPos = { x: centre.x - casterDir.x * radius * 1.5, y: centre.y - casterDir.y * radius * 1.5, z: centre.z - casterDir.z * radius * 1.5 };
+    const shadow = shadowSettingsFor(doc);
 
     const idx = (list) => new Map(list.map((it, i) => [it.id, i]));
     const teleIndex = idx(doc.teleporters);
@@ -167,7 +203,7 @@ export function compileDocument(doc) {
                 shadowStrength: env.shadowStrength ?? 0.75,
             };
         }),
-        shadowSettings: { position: mirror(shadowPos), far: radius * 3.5, halfWidth: radius, halfHeight: radius },
+        shadowSettings: { position: mirror(shadow.position), far: shadow.far, halfWidth: shadow.halfWidth, halfHeight: shadow.halfHeight },
         gradientSkybox: { features: 0, bottom: hexToRgb(env.skyBottom), horizon: hexToRgb(env.skyHorizon), top: hexToRgb(env.skyTop) },
         fogColor: hexToRgb(env.fogColor),
         fogDensity: Math.max(0, env.fogDensity ?? 0),

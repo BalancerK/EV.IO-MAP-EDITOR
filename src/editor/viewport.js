@@ -5,13 +5,65 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { buildBlockTriangles } from '../model/geometry.js';
-import { lightDirection, cameraForward, hexToRgb } from '../model/compile.js';
+import { lightDirection, cameraForward, hexToRgb, shadowSettingsFor } from '../model/compile.js';
 import { COLLISION } from '../model/document.js';
 
 const COLORS = { spawn: 0x4fd47a, team1: 0x4f8fff, team2: 0xff8a3d, weapon: 0xb07cff, teleport: 0xff5d5d, nav: 0xffd84a, camera: 0x4cc9f0, select: 0xf0a830, br: 0xff5d5d, kill: 0xff3b30 };
 const KILL_Y = -30;
 const deg = THREE.MathUtils.degToRad;
 const rad = THREE.MathUtils.radToDeg;
+
+// ---------------------------------------------------------------- render like the game
+// ev.io 1-7-1 renders with an older three.js: no colour management, no tone mapping, linear output,
+// legacy light units, VSM shadows, and toon materials through three.js's threeTone gradient. It
+// also patches two shader chunks. All of that is reproduced here so the editor (and the Upload
+// images renders) look like the game.
+THREE.ColorManagement.enabled = false;
+
+// Game fog (its "HackFogExpSmooth"): the stronger of exp2 fog at the map's density and a linear
+// fade over the last 30% of the view distance. Used through THREE.Fog(color, density, farPlane).
+THREE.ShaderChunk.fog_fragment = `
+#ifdef USE_FOG
+	#ifdef FOG_EXP2
+		float fogFactor = 1.0 - exp( - fogDensity * fogDensity * vFogDepth * vFogDepth );
+	#else
+		float fogLastMile = ( clamp( vFogDepth / fogFar, 0.7, 1.0 ) - 0.7 ) / 0.3;
+		float fogExp2 = 1.0 - exp( - fogNear * fogNear * vFogDepth * vFogDepth );
+		float fogFactor = max( fogLastMile, fogExp2 );
+	#endif
+	gl_FragColor.rgb = mix( gl_FragColor.rgb, fogColor, fogFactor );
+#endif
+`;
+
+// Game shadow patch: a shadow darkens direct light only down to (1 - shadowStrength), and with
+// EV_USE_SHADOW_HACK a face turned away from the sun counts as fully shadowed.
+{
+    const from = 'directLight.color *= ( directLight.visible && receiveShadow ) ? getShadow( directionalShadowMap[ i ], directionalLightShadow.shadowMapSize, directionalLightShadow.shadowBias, directionalLightShadow.shadowRadius, vDirectionalShadowCoord[ i ] ) : 1.0;';
+    const to = `float evShadow = ( directLight.visible && receiveShadow ) ? getShadow( directionalShadowMap[ i ], directionalLightShadow.shadowMapSize, directionalLightShadow.shadowBias, directionalLightShadow.shadowRadius, vDirectionalShadowCoord[ i ] ) : 1.0;
+		#if defined( EV_USE_SHADOW_HACK )
+			evShadow *= dot( directLight.direction, geometryNormal ) > 0.0 ? 1.0 : 0.0;
+		#endif
+		#if defined( SHADOW_INV_STRENGTH )
+			directLight.color *= max( SHADOW_INV_STRENGTH, evShadow );
+		#else
+			directLight.color *= evShadow;
+		#endif`;
+    if (THREE.ShaderChunk.lights_fragment_begin.includes(from)) {
+        THREE.ShaderChunk.lights_fragment_begin = THREE.ShaderChunk.lights_fragment_begin.replace(from, to);
+    } else {
+        console.warn('[map-editor] three.js shadow chunk changed: game shadow strength not applied');
+    }
+}
+
+// The game loads this exact gradient (three.js's examples/textures/gradientMaps/threeTone.jpg) with
+// default filtering. Until it arrives, an equivalent three-step ramp stands in.
+const TOON_GRADIENT_URL = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/gradientMaps/threeTone.jpg';
+const toonGradient = new THREE.DataTexture(new Uint8Array([90, 90, 90, 255, 170, 170, 170, 255, 255, 255, 255, 255]), 3, 1);
+toonGradient.needsUpdate = true;
+new THREE.TextureLoader().load(TOON_GRADIENT_URL, (tex) => {
+    toonGradient.image = tex.image;
+    toonGradient.needsUpdate = true;
+}, undefined, () => { /* offline: keep the built-in ramp */ });
 
 export class Viewport {
     constructor(container, callbacks) {
@@ -29,7 +81,9 @@ export class Viewport {
         const renderer = this.renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         renderer.shadowMap.enabled = true;
-        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.shadowMap.type = THREE.VSMShadowMap;           // the game's shadow type
+        renderer.outputColorSpace = THREE.LinearSRGBColorSpace; // the game writes colours as-is
+        renderer.useLegacyLights = true;                        // the game's light units
         container.appendChild(renderer.domElement);
 
         const scene = this.scene = new THREE.Scene();
@@ -69,8 +123,11 @@ export class Viewport {
 
         this.hemi = new THREE.HemisphereLight(0xabd4ff, 0xbb9e8c, 0.3);
         scene.add(this.hemi);
-        this.ambient = new THREE.AmbientLight(0xffffff, 0.35);   // editor-only lift so dark faces stay readable
+        // Editor-only work light (off by default, so the view matches the game): lifts dark faces
+        // when building inside unlit areas. Never part of exported maps or rendered images.
+        this.ambient = new THREE.AmbientLight(0xffffff, 0);
         scene.add(this.ambient);
+        this.framing = null;
         this.lights = [];
 
         this.contentRoot = new THREE.Group();
@@ -91,6 +148,7 @@ export class Viewport {
         this.raycaster = new THREE.Raycaster();
         this.pointer = new THREE.Vector2();
         this.bindPointer();
+        this.bindFramingInput();
         this.resizeObserver = new ResizeObserver(() => this.resize());
         this.resizeObserver.observe(container);
         this.resize();
@@ -107,7 +165,11 @@ export class Viewport {
     }
 
     frame() {
-        if (this.flyover) this.stepFlyover();
+        const now = performance.now();
+        const dt = Math.min(0.1, (now - (this._lastFrame || now)) / 1000);
+        this._lastFrame = now;
+        if (this.framing) this.stepFraming(dt);
+        else if (this.flyover) this.stepFlyover();
         else this.orbit.update();
         if (this.selectionBox.visible && this.selectedObject3D()) this.selectionBox.update();
         this.sky.position.copy(this.camera.position);
@@ -115,6 +177,7 @@ export class Viewport {
     }
 
     setGrid(size) { this.grid = size; this.gizmo.setTranslationSnap(size); }
+    setWorkLight(on) { this.ambient.intensity = on ? 0.45 : 0; }
     setTool(tool, placing = null) {
         this.tool = tool;
         this.placing = placing;
@@ -137,14 +200,22 @@ export class Viewport {
         if (block.collision === COLLISION.INVISIBLE) {
             return this.cachedMaterial('invisible', () => new THREE.MeshBasicMaterial({ color: 0xff5d5d, transparent: true, opacity: 0.18, depthWrite: false }));
         }
+        // The game's map material (bundle: buildEVMaterial): toon shading through the threeTone
+        // gradient, dithered, front faces drawn, both sides casting shadows, plus the shadow-strength
+        // and away-from-sun defines its patched shader reads.
         const m = this.doc.materials.find((x) => x.id === block.materialId) || this.doc.materials[0];
-        const key = `${m?.id}|${m?.color}|${m?.opacity ?? 1}|${m?.emissive || ''}|${block.collision}`;
-        return this.cachedMaterial(key, () => new THREE.MeshLambertMaterial({
+        const inv = (1 - (this.doc.environment.shadowStrength ?? 0.75)).toFixed(4);
+        const key = `${m?.id}|${m?.color}|${m?.opacity ?? 1}|${m?.emissive || ''}|${inv}`;
+        return this.cachedMaterial(key, () => new THREE.MeshToonMaterial({
             color: new THREE.Color(m?.color || '#9aa1a8'),
             emissive: new THREE.Color(m?.emissive || '#000000'),
-            transparent: (m?.opacity ?? 1) < 0.99 || block.collision === COLLISION.VISUAL,
-            opacity: block.collision === COLLISION.VISUAL ? Math.min(m?.opacity ?? 1, 0.75) : (m?.opacity ?? 1),
-            flatShading: true,
+            opacity: m?.opacity ?? 1,
+            transparent: (m?.opacity ?? 1) < 0.99,
+            gradientMap: toonGradient,
+            dithering: true,
+            side: THREE.FrontSide,
+            shadowSide: THREE.DoubleSide,
+            defines: { TOON: '', SHADOW_INV_STRENGTH: inv, EV_USE_SHADOW_HACK: '' },
         }));
     }
     cachedMaterial(key, make) {
@@ -166,6 +237,7 @@ export class Viewport {
                 this.blockMeshes.set(block.id, mesh);
             }
             mesh.material = this.materialFor(block);
+            mesh.userData.invisible = block.collision === COLLISION.INVISIBLE;   // hidden in rendered images
             mesh.position.set(block.position.x, block.position.y, block.position.z);
             mesh.rotation.set(deg(block.rotation.x), deg(block.rotation.y), deg(block.rotation.z), 'XYZ');
             mesh.scale.set(1, 1, 1);
@@ -182,7 +254,11 @@ export class Viewport {
         this.objectGroups.clear();
         const add = (kind, item, obj) => {
             obj.userData = { kind, id: item.id };
-            obj.traverse((c) => { c.userData = { kind, id: item.id }; });
+            // Parents are visited before children, so a camera marker's start/end part flows down.
+            obj.traverse((c) => {
+                const part = c.userData.part || (c.parent && c.parent.userData.part);
+                c.userData = part ? { kind, id: item.id, part } : { kind, id: item.id };
+            });
             this.objectRoot.add(obj);
             this.objectGroups.set(item.id, obj);
         };
@@ -222,7 +298,8 @@ export class Viewport {
         this.sky.material.uniforms.top.value.set(env.skyTop);
         this.sky.material.uniforms.horizon.value.set(env.skyHorizon);
         this.sky.material.uniforms.bottom.value.set(env.skyBottom);
-        this.scene.fog = env.fogDensity > 1e-9 ? new THREE.FogExp2(new THREE.Color(env.fogColor), env.fogDensity) : null;
+        // THREE.Fog's near carries the density into the game's fog formula (see fog_fragment above).
+        this.scene.fog = env.fogDensity > 1e-9 ? new THREE.Fog(new THREE.Color(env.fogColor), env.fogDensity, Math.max(100, env.farPlane || 1000)) : null;
         this.hemi.color.set(env.hemiSky);
         this.hemi.groundColor.set(env.hemiGround);
         this.hemi.intensity = env.hemiIntensity;
@@ -230,19 +307,26 @@ export class Viewport {
         this.camera.updateProjectionMatrix();
         for (const l of this.lights) { this.scene.remove(l); this.scene.remove(l.target); }
         this.lights = [];
+        // Placed as the game places them: the shadow caster at the exported shadow position aiming
+        // along its direction, with the same box, bias and blur; the others shine from -direction.
         let shadowUsed = false;
+        const shadow = shadowSettingsFor(doc);
         for (const l of doc.lights) {
             const light = new THREE.DirectionalLight(new THREE.Color(l.color), l.intensity);
             const d = lightDirection(l);
-            light.position.set(-d.x * 120, -d.y * 120, -d.z * 120);
+            light.position.set(-d.x, -d.y, -d.z);
             light.target.position.set(0, 0, 0);
             if (l.castsShadow && !shadowUsed) {
                 shadowUsed = true;
+                light.position.set(shadow.position.x, shadow.position.y, shadow.position.z);
+                light.target.position.set(shadow.position.x + d.x, shadow.position.y + d.y, shadow.position.z + d.z);
                 light.castShadow = true;
                 light.shadow.mapSize.set(2048, 2048);
                 const s = light.shadow.camera;
-                s.left = -120; s.right = 120; s.top = 120; s.bottom = -120; s.near = 1; s.far = 400;
-                light.shadow.bias = -0.0004;
+                s.left = -shadow.halfWidth; s.right = shadow.halfWidth; s.top = shadow.halfHeight; s.bottom = -shadow.halfHeight;
+                s.near = 0.5; s.far = shadow.far;
+                light.shadow.bias = -3e-4;
+                light.shadow.radius = 5;
             }
             this.scene.add(light);
             this.scene.add(light.target);
@@ -258,7 +342,11 @@ export class Viewport {
     selectedObject3D() {
         if (!this.selection) return null;
         if (this.selection.kind === 'block') return this.blockMeshes.get(this.selection.id) || null;
-        return this.objectGroups.get(this.selection.id) || null;
+        const group = this.objectGroups.get(this.selection.id) || null;
+        if (group && this.selection.kind === 'cameraPaths' && this.selection.part) {
+            return group.children.find((c) => c.userData.part === this.selection.part) || group;
+        }
+        return group;
     }
     attachGizmo() {
         const obj = this.tool === 'select' ? this.selectedObject3D() : null;
@@ -268,7 +356,7 @@ export class Viewport {
         const mode = this.gizmo.getMode();
         if (kind !== 'block' && mode !== 'translate') this.gizmo.setMode('translate');
         this.gizmo.showX = true; this.gizmo.showY = true; this.gizmo.showZ = true;
-        if (kind === 'cameraPaths') { this.gizmo.detach(); }
+        if (kind === 'cameraPaths' && !this.selection.part) { this.gizmo.detach(); }
         else this.gizmo.attach(obj);
         this.selectionBox.setFromObject(obj);
         this.selectionBox.visible = true;
@@ -288,7 +376,8 @@ export class Viewport {
                 size: { x: snapSize(size.x), y: snapSize(size.y), z: snapSize(size.z) },
             });
         } else {
-            this.cb.onTransform(sel, { delta: { x: round(obj.position.x), y: round(obj.position.y), z: round(obj.position.z) } });
+            // Camera markers sit in a group at the origin, so their local position is world position.
+            this.cb.onTransform(sel, { delta: { x: round(obj.position.x), y: round(obj.position.y), z: round(obj.position.z) }, part: sel.part });
         }
     }
 
@@ -301,7 +390,7 @@ export class Viewport {
             if (e.button !== 0 || !down) return;
             const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4;
             down = null;
-            if (moved || this.gizmo.dragging || this.gizmoHovered) return;
+            if (moved || this.gizmo.dragging || this.gizmoHovered || this.framing) return;
             this.updatePointer(e);
             if (this.tool === 'place') this.placeAtPointer();
             else this.pickAtPointer();
@@ -325,7 +414,8 @@ export class Viewport {
         const targets = [...this.objectRoot.children.filter((o) => o.userData.kind !== 'decor'), ...this.contentRoot.children];
         const hits = this.raycaster.intersectObjects(targets, true);
         const hit = hits.find((h) => h.object.userData && h.object.userData.id);
-        this.cb.onSelect(hit ? { kind: hit.object.userData.kind, id: hit.object.userData.id } : null);
+        const u = hit && hit.object.userData;
+        this.cb.onSelect(u ? (u.part ? { kind: u.kind, id: u.id, part: u.part } : { kind: u.kind, id: u.id }) : null);
     }
     // First surface under the pointer: a block face, else the ground plane (y = 0).
     surfaceHit() {
@@ -386,6 +476,100 @@ export class Viewport {
         if (pos) this.cb.onPlace(pos, hit);
     }
 
+    // ------------------------------------------------------------------ framing a camera shot
+    // Look through a camera and fly it: right-drag to look, WASD to move, Q/E down/up, Shift for
+    // speed, scroll to change speed. Enter saves (onSave gets the new pose), Esc cancels. The
+    // editor's own shortcuts are suspended meanwhile (keys are taken in the capture phase).
+    startFraming(pose, { onSave, onCancel, label } = {}) {
+        this.stopFlyover();
+        if (this.framing) this.endFraming(false);
+        const start = pose || this.viewPose();
+        this.framing = {
+            yaw: start.yaw || 0, pitch: start.pitch || 0,
+            keys: new Set(), speed: 15, dragging: false,
+            onSave, onCancel, label,
+            restore: { position: this.camera.position.clone(), target: this.orbit.target.clone() },
+        };
+        this.camera.position.set(start.position.x, start.position.y, start.position.z);
+        this.orbit.enabled = false;
+        this.gizmo.detach();
+        this.selectionBox.visible = false;
+        this.ghost.visible = false;
+        this.renderer.domElement.focus?.();
+        this.cb.onFramingChange?.(this.framing);
+    }
+    endFraming(save) {
+        const f = this.framing;
+        if (!f) return;
+        const pose = this.viewPose();
+        this.framing = null;
+        // Keep looking where the shot looks; orbit around a point a little ahead.
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+        this.orbit.target.copy(this.camera.position).addScaledVector(fwd, 15);
+        this.orbit.enabled = true;
+        this.attachGizmo();
+        this.cb.onFramingChange?.(null);
+        if (save) f.onSave?.(pose); else f.onCancel?.();
+    }
+    stepFraming(dt) {
+        const f = this.framing;
+        this.camera.rotation.set(deg(f.pitch), deg(f.yaw), 0, 'YXZ');
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+        const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
+        const move = new THREE.Vector3();
+        if (f.keys.has('w')) move.add(fwd);
+        if (f.keys.has('s')) move.sub(fwd);
+        if (f.keys.has('d')) move.add(right);
+        if (f.keys.has('a')) move.sub(right);
+        if (f.keys.has('e')) move.y += 1;
+        if (f.keys.has('q')) move.y -= 1;
+        if (move.lengthSq() > 0) {
+            const speed = f.speed * (f.keys.has('shift') ? 3 : 1);
+            this.camera.position.addScaledVector(move.normalize(), speed * dt);
+        }
+    }
+    bindFramingInput() {
+        const el = this.renderer.domElement;
+        window.addEventListener('keydown', (e) => {
+            const f = this.framing;
+            if (!f || /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName)) return;
+            const k = e.key.toLowerCase();
+            e.stopImmediatePropagation();
+            if (k === 'enter') { e.preventDefault(); this.endFraming(true); return; }
+            if (k === 'escape') { e.preventDefault(); this.endFraming(false); return; }
+            if ('wasdqe'.includes(k) && k.length === 1) { e.preventDefault(); f.keys.add(k); }
+            if (k === 'shift') f.keys.add('shift');
+        }, true);
+        window.addEventListener('keyup', (e) => {
+            if (!this.framing) return;
+            const k = e.key.toLowerCase();
+            this.framing.keys.delete(k === 'shift' ? 'shift' : k);
+        }, true);
+        window.addEventListener('blur', () => { if (this.framing) this.framing.keys.clear(); });
+        el.addEventListener('pointerdown', (e) => {
+            if (!this.framing || (e.button !== 2 && e.button !== 0)) return;
+            this.framing.dragging = true;
+            el.setPointerCapture(e.pointerId);
+        });
+        el.addEventListener('pointermove', (e) => {
+            const f = this.framing;
+            if (!f || !f.dragging) return;
+            f.yaw = (f.yaw - e.movementX * 0.15 + 360) % 360;
+            f.pitch = Math.max(-89, Math.min(89, f.pitch - e.movementY * 0.15));
+        });
+        el.addEventListener('pointerup', (e) => {
+            if (!this.framing) return;
+            this.framing.dragging = false;
+            try { el.releasePointerCapture(e.pointerId); } catch { /* not captured */ }
+        });
+        el.addEventListener('wheel', (e) => {
+            if (!this.framing) return;
+            e.preventDefault();
+            this.framing.speed = Math.max(2, Math.min(120, this.framing.speed * (e.deltaY > 0 ? 0.85 : 1.18)));
+            this.cb.onFramingChange?.(this.framing);
+        }, { passive: false });
+    }
+
     // ------------------------------------------------------------------ still images
     // Render the map (without editor-only helpers) to a canvas of the given size, from `pose`
     // ({ position, yaw, pitch }, the camera-path convention) or, when omitted, the current view.
@@ -402,7 +586,10 @@ export class Viewport {
         }
         cam.updateMatrixWorld();
 
-        const helpers = [this.gridHelper, this.killPlane, this.gizmo, this.selectionBox, this.ghost, this.objectRoot];
+        const invisibleWalls = this.contentRoot.children.filter((m) => m.userData.invisible);
+        const helpers = [this.gridHelper, this.killPlane, this.gizmo, this.selectionBox, this.ghost, this.objectRoot, ...invisibleWalls];
+        const workLight = this.ambient.intensity;
+        this.ambient.intensity = 0;
         const wasVisible = helpers.map((o) => o.visible);
         helpers.forEach((o) => { o.visible = false; });
         const skyPos = this.sky.position.clone();
@@ -417,6 +604,7 @@ export class Viewport {
             this.renderer.setRenderTarget(null);
             target.dispose();
             helpers.forEach((o, i) => { o.visible = wasVisible[i]; });
+            this.ambient.intensity = workLight;
             this.sky.position.copy(skyPos);
         }
 
@@ -453,9 +641,13 @@ export class Viewport {
         this.orbit.target.copy(c);
         this.camera.position.copy(c).addScaledVector(dir, r * 1.4);
     }
-    playFlyover(path) {
-        this.flyover = { path, t: 0, last: performance.now() };
+    // Play one camera path, or several in a row (the menu loop: each path once, in order).
+    playFlyover(paths) {
+        const list = (Array.isArray(paths) ? paths : [paths]).filter(Boolean);
+        if (!list.length) return;
+        this.flyover = { paths: list, index: 0, path: list[0], t: 0, last: performance.now() };
         this.orbit.enabled = false;
+        this.cb.onFlyover?.(0, list.length);
     }
     stopFlyover() {
         if (!this.flyover) return;
@@ -471,7 +663,12 @@ export class Viewport {
         const qa = new THREE.Quaternion().setFromEuler(new THREE.Euler(deg(a.pitch), deg(a.yaw), 0, 'YXZ'));
         const qb = new THREE.Quaternion().setFromEuler(new THREE.Euler(deg(b.pitch), deg(b.yaw), 0, 'YXZ'));
         this.camera.quaternion.copy(qa.slerp(qb, k));
-        if (k >= 1) { this.stopFlyover(); this.cb.onFlyoverEnd?.(); }
+        if (k >= 1) {
+            if (f.index + 1 < f.paths.length) {
+                f.index += 1; f.path = f.paths[f.index]; f.t = 0;
+                this.cb.onFlyover?.(f.index, f.paths.length);
+            } else { this.stopFlyover(); this.cb.onFlyoverEnd?.(); }
+        }
     }
 }
 
@@ -493,7 +690,7 @@ function makeSkyDome() {
     const mat = new THREE.ShaderMaterial({
         uniforms: { top: { value: new THREE.Color('#4db4ff') }, horizon: { value: new THREE.Color('#bfd1ff') }, bottom: { value: new THREE.Color('#bce1ff') } },
         vertexShader: 'varying vec3 vDir; void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-        fragmentShader: 'uniform vec3 top; uniform vec3 horizon; uniform vec3 bottom; varying vec3 vDir; void main(){ float h = vDir.y; vec3 c = h > 0.0 ? mix(horizon, top, pow(h, 0.6)) : mix(horizon, bottom, pow(-h, 0.6)); gl_FragColor = vec4(c, 1.0); }',
+        fragmentShader: 'uniform vec3 top; uniform vec3 horizon; uniform vec3 bottom; varying vec3 vDir; void main(){ float t = normalize(vDir).y; vec3 c = t < 0.0 ? mix(horizon, bottom, -t) : mix(horizon, top, t); gl_FragColor = vec4(c, 1.0); }',
         side: THREE.BackSide,
         depthWrite: false,
         fog: false,
@@ -562,7 +759,10 @@ function markerCameraPath(c) {
         cam.rotation.set(deg(pose.pitch), deg(pose.yaw), 0, 'YXZ');
         return cam;
     };
-    g.add(mk(c.start, COLORS.camera), mk(c.end, 0x2a7f99));
+    const startCam = mk(c.start, COLORS.camera), endCam = mk(c.end, 0x2a7f99);
+    startCam.userData.part = 'start';
+    endCam.userData.part = 'end';
+    g.add(startCam, endCam);
     const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(c.start.position.x, c.start.position.y, c.start.position.z), new THREE.Vector3(c.end.position.x, c.end.position.y, c.end.position.z)]), new THREE.LineBasicMaterial({ color: COLORS.camera }));
     g.add(line);
     return g;

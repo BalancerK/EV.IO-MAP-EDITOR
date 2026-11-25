@@ -17,7 +17,14 @@ server (for example `python -m http.server`) and open `index.html`.
 - **Materials**: colour, roughness, opacity, glow.
 - **Gameplay objects**: free-for-all and team spawns with facing, weapon spawns, teleporters with
   links (placing one right after another pairs them), bot nav nodes (chained as you place them),
-  menu camera paths (set from the current view, with a preview), battle royale circle.
+  battle royale circle.
+- **Menu camera paths**: frame each shot by looking through the camera and flying it (right-drag to
+  look, WASD/Q/E to move, Enter to save); drag the start and end cameras with the gizmo; preview a
+  path or play the whole menu loop; or generate six paths circling the map as a starting point.
+- **Looks like the game**: rendered the way ev.io 1-7-1 renders maps (toon shading through the same
+  gradient, its shadow-strength and fog shader patches, VSM shadows, the same shadow camera and
+  colour handling), so what you build is what players see. A *work light* checkbox brightens the
+  view while building; it never affects exports or images.
 - **Sky and light**: gradient sky, fog, view distance, ambient light, up to four sun lights.
 - **Checklist**: ev.io's submission checklist, run live (spawns, collision, lights, kill zone at
   y = −30, ...).

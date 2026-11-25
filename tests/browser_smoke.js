@@ -35,6 +35,8 @@ async function main() {
         if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); }
         if (msg.method === 'Runtime.exceptionThrown') errors.push(msg.params.exceptionDetails.exception?.description || msg.params.exceptionDetails.text);
         if (msg.method === 'Runtime.consoleAPICalled' && msg.params.type === 'error') errors.push(msg.params.args.map((a) => a.value ?? a.description).join(' '));
+        // confirm() dialogs (e.g. "replace your camera paths?"): accept.
+        if (msg.method === 'Page.javascriptDialogOpening') ws.send(JSON.stringify({ id: ++seq, method: 'Page.handleJavaScriptDialog', params: { accept: true } }));
     });
     const send = (method, params = {}) => new Promise((r) => { const id = ++seq; pending.set(id, r); ws.send(JSON.stringify({ id, method, params })); });
     const evaluate = async (expression) => {
@@ -120,6 +122,52 @@ async function main() {
     const built = bpw.buildWorldFromEvmapBuffer(bytes, 'smoke');
     check(!!built.world && built.spawns.length === 2, 'server builds a physics world from the browser export');
 
+    // Camera paths: the two-shot framing flow with real keys and mouse, then generate, play, move.
+    await evaluate(`document.querySelector('#export-dialog').close()`);
+    const key = async (k, code, vk, holdMs = 0) => {
+        await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: k, code, windowsVirtualKeyCode: vk });
+        if (holdMs) await sleep(holdMs);
+        await send('Input.dispatchKeyEvent', { type: 'keyUp', key: k, code, windowsVirtualKeyCode: vk });
+        await sleep(120);
+    };
+    const rightDrag = async (x, y, dx, dy) => {
+        await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'right', clickCount: 1 });
+        for (let i = 1; i <= 5; i++) await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x + (dx * i) / 5, y: y + (dy * i) / 5, button: 'right', buttons: 2 });
+        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: x + dx, y: y + dy, button: 'right', clickCount: 1 });
+        await sleep(120);
+    };
+    const pathsBefore = (await doc()).cameraPaths.length;
+    await press('[data-key="o:Camera"]');
+    await sleep(200);
+    const banner1 = await evaluate(`document.querySelector('#frame-banner').hidden ? '' : document.querySelector('#frame-label').textContent`);
+    check(/START/.test(banner1), `Camera opens the framing banner for the start shot ("${banner1}")`);
+    await key('w', 'KeyW', 87, 600);                 // fly forward
+    await rightDrag(vp.x, vp.y, 120, 30);            // look right and down
+    await key('Enter', 'Enter', 13);
+    const banner2 = await evaluate(`document.querySelector('#frame-label').textContent`);
+    check(/END/.test(banner2), `Enter saves the start and moves on to the end shot ("${banner2}")`);
+    await key('d', 'KeyD', 68, 600);                 // strafe right
+    await key('Enter', 'Enter', 13);
+    d = await doc();
+    const cam = d.cameraPaths[d.cameraPaths.length - 1];
+    check(d.cameraPaths.length === pathsBefore + 1 && await evaluate(`document.querySelector('#frame-banner').hidden`), 'the second Enter creates the path and closes the banner');
+    check(cam && Math.hypot(cam.end.position.x - cam.start.position.x, cam.end.position.z - cam.start.position.z) > 1, `the end shot is where the camera flew to (start ${JSON.stringify(cam?.start.position)}, end ${JSON.stringify(cam?.end.position)})`);
+    check(cam && Math.abs(cam.start.pitch) > 1, `the mouse drag changed the shot's aim (pitch ${cam?.start.pitch})`);
+    const keysLeak = await evaluate(`document.querySelector('[data-gizmo="translate"]').classList.contains('active')`);
+    check(keysLeak, 'framing keys did not reach the editor shortcuts (W/E/R gizmo modes unchanged)');
+
+    await press('[data-key="o:Auto paths"]');
+    await sleep(300);
+    d = await doc();
+    check(d.cameraPaths.length === 6 && d.cameraPaths.every((c) => c.start.pitch < 0), `Auto paths makes 6 paths looking down at the map (${d.cameraPaths.length})`);
+    await evaluate(`[...document.querySelectorAll('#inspector button')].find((b) => b.textContent === 'Play menu loop').click()`);
+    await sleep(400);
+    await evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    await evaluate(`[...document.querySelectorAll('#inspector button')].find((b) => b.textContent === 'Move').click()`);
+    await sleep(150);
+    const moveCard = await evaluate(`[...document.querySelectorAll('#inspector .card')].findIndex((c) => c.style.borderColor !== '')`);
+    check(moveCard === 0, "Move selects that shot's marker for the gizmo");
+
     // Upload images: exact sizes and formats, real content (not a blank frame), view switching.
     await evaluate(`document.querySelector('#export-dialog').close()`);
     await press('#btn-images');
@@ -139,11 +187,13 @@ async function main() {
     })()`);
     check(stills.large.w === 2000 && stills.large.h === 902 && stills.large.type === 'image/jpeg', `large image is 2000x902 JPEG (${JSON.stringify(stills.large)})`);
     check(stills.thumb.w === 166 && stills.thumb.h === 70 && stills.thumb.type === 'image/png', `thumbnail is 166x70 PNG (${JSON.stringify(stills.thumb)})`);
-    check(stills.large.colours > 20 && stills.thumb.colours > 10, 'both images show the map, not a blank frame');
+    // Toon shading has few tones and a simple test map is mostly sky: require more than a blank frame.
+    check(stills.large.colours > 10 && stills.thumb.colours >= 3, 'both images show the map, not a blank frame');
     const firstSrc = await evaluate(`document.querySelector('#large-preview').src`);
     await evaluate(`(() => { const s = document.querySelector('#images-view'); s.value = 'view'; s.dispatchEvent(new Event('change')); })()`);
-    await sleep(1500);
-    check((await evaluate(`document.querySelector('#large-preview').src`)) !== firstSrc, 'changing the view re-renders the images');
+    let rerendered = false;
+    for (let i = 0; i < 40 && !rerendered; i++) { await sleep(250); rerendered = (await evaluate(`document.querySelector('#large-preview').src`)) !== firstSrc; }
+    check(rerendered, 'changing the view re-renders the images');
     const stillShot = path.join(path.dirname(shot), 'evio-map-editor-large.jpg');
     const largeB64 = await evaluate(`(async () => { const b = await (await fetch(document.querySelector('#large-preview').src)).blob(); const a = new Uint8Array(await b.arrayBuffer()); let s = ''; for (const x of a) s += String.fromCharCode(x); return btoa(s); })()`);
     fs.writeFileSync(stillShot, Buffer.from(largeB64, 'base64'));

@@ -52,6 +52,7 @@
                     <button type="button" data-gizmo="rotate" title="Rotate (E)">Rotate</button>
                     <button type="button" data-gizmo="scale" title="Resize (R)">Size</button>
                 </div>
+                <label class="check" title="Brightens the view while you build. The game, exports and images never use it."><input id="work-light" type="checkbox"> Work light (editor only)</label>
                 <label class="field inline">
                     <span>Grid</span>
                     <select id="grid-size">
@@ -88,6 +89,14 @@
                 <span id="hud-hint">Left-click to select · Right-drag to orbit · Middle-drag to pan · Scroll to zoom</span>
             </div>
             <div class="hud-right"><span id="hud-coords" class="mono">x —  y —  z —</span></div>
+            <div id="frame-banner" class="frame-banner" hidden>
+                <div class="frame-text">
+                    <strong id="frame-label">Framing a camera shot</strong>
+                    <span>Right-drag to look · WASD move · Q/E down/up · Shift faster · scroll speed <span id="frame-speed" class="mono"></span></span>
+                </div>
+                <button id="frame-cancel" type="button">Cancel <kbd>Esc</kbd></button>
+                <button id="frame-save" type="button" class="primary">Save shot <kbd>Enter</kbd></button>
+            </div>
         </section>
 
         <aside class="panel right" aria-label="Properties">

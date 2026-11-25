@@ -3,7 +3,7 @@
 // re-renders and autosaves.
 import { Viewport } from './editor/viewport.js';
 import { newDocument, normaliseDocument, newId, validate, COLLISION, TEAMS } from './model/document.js';
-import { compileDocument } from './model/compile.js';
+import { compileDocument, generateCameraPaths } from './model/compile.js';
 import { buildBlockTriangles } from './model/geometry.js';
 import { writeEvmap } from './evmap/format.js';
 
@@ -30,6 +30,7 @@ const OBJECT_PIECES = [
     { label: 'Teleporter', type: 'teleporters', color: 'var(--teleport)' },
     { label: 'Nav node', type: 'navNodes', color: 'var(--nav)' },
     { label: 'Camera', type: 'cameraPaths', color: 'var(--camera)', instant: true },
+    { label: 'Auto paths', type: 'cameraAuto', color: 'var(--camera)', instant: true, title: 'Generate 6 menu camera paths circling the map' },
     { label: 'BR circle', type: 'brCircle', color: 'var(--teleport)', instant: true },
 ];
 const KIND_LABEL = { block: 'Block', playerSpawns: 'Player spawn', weaponSpawns: 'Weapon spawn', teleporters: 'Teleporter', navNodes: 'Nav node', cameraPaths: 'Camera path', brCircle: 'Battle royale circle' };
@@ -103,7 +104,10 @@ const viewport = new Viewport($('#viewport'), {
                 if (b) Object.assign(b, { position: t.position, rotation: t.rotation, size: t.size });
             } else if (sel.kind === 'brCircle') {
                 doc.brCircle.position = t.delta;
-            } else if (sel.kind !== 'cameraPaths') {
+            } else if (sel.kind === 'cameraPaths') {
+                const c = doc.cameraPaths.find((x) => x.id === sel.id);
+                if (c && t.part) c[t.part].position = t.delta;
+            } else {
                 const item = (doc[sel.kind] || []).find((x) => x.id === sel.id);
                 if (item) item.position = t.delta;
             }
@@ -111,6 +115,8 @@ const viewport = new Viewport($('#viewport'), {
     },
     onHover(p) { $('#hud-coords').textContent = `x ${p.x.toFixed(1)}  y ${p.y.toFixed(1)}  z ${p.z.toFixed(1)}`; },
     onFlyoverEnd() { toast('Camera preview finished'); },
+    onFlyover(i, n) { if (n > 1) toast(`Menu loop: camera path ${i + 1} of ${n} · Esc to stop`); },
+    onFramingChange(f) { renderFramingBanner(f); },
 });
 
 function select(sel) {
@@ -162,14 +168,65 @@ function placePiece(pos) {
     renderInspector();
 }
 
+// ------------------------------------------------------------------ camera paths
+// New path, in two framed shots: fly to the start shot and press Enter, then to the end shot.
+function addCameraPath() {
+    setTool('select');
+    viewport.startFraming(null, {
+        label: 'New camera path · 1 of 2 · frame the START shot',
+        onSave: (start) => viewport.startFraming(start, {
+            label: 'New camera path · 2 of 2 · frame the END shot',
+            onSave: (end) => {
+                let id;
+                change((doc) => { id = newId('cam'); doc.cameraPaths.push({ id, start, end, seconds: 25 }); });
+                select({ kind: 'cameraPaths', id });
+                toast('Camera path added');
+            },
+            onCancel: () => toast('New camera path cancelled'),
+        }),
+        onCancel: () => toast('New camera path cancelled'),
+    });
+}
+
+function frameShot(id, key) {
+    const c = state.doc.cameraPaths.find((x) => x.id === id);
+    if (!c) return;
+    const i = state.doc.cameraPaths.indexOf(c);
+    viewport.startFraming(c[key], {
+        label: `Camera path ${i + 1} · frame the ${key.toUpperCase()} shot`,
+        onSave: (pose) => {
+            change((doc) => { const t = doc.cameraPaths.find((x) => x.id === id); if (t) t[key] = pose; });
+            toast(`${key === 'start' ? 'Start' : 'End'} shot saved`);
+        },
+    });
+}
+
+function generatePaths() {
+    if (state.doc.cameraPaths.length && !confirm(`Replace your ${state.doc.cameraPaths.length} camera path(s) with 6 new ones circling the map?`)) return;
+    let paths;
+    change((doc) => { paths = generateCameraPaths(doc, newId); doc.cameraPaths = paths; });
+    select({ kind: 'cameraPaths', id: paths[0].id });
+    toast('6 camera paths circle the map · press Play menu loop to watch');
+}
+
+function playMenuLoop() {
+    if (!state.doc.cameraPaths.length) { toast('No camera paths yet'); return; }
+    viewport.playFlyover(state.doc.cameraPaths);
+}
+
+function renderFramingBanner(f) {
+    const b = $('#frame-banner');
+    if (!f) { b.hidden = true; return; }
+    b.hidden = false;
+    $('#frame-label').textContent = f.label || 'Framing a camera shot';
+    $('#frame-speed').textContent = `${Math.round(f.speed)} m/s`;
+}
+
 function addInstantPiece(p) {
     if (p.type === 'cameraPaths') {
-        const pose = viewport.viewPose();
-        const end = { position: { x: pose.position.x + 20, y: pose.position.y, z: pose.position.z }, yaw: pose.yaw, pitch: pose.pitch };
-        let id;
-        change((doc) => { id = newId('cam'); doc.cameraPaths.push({ id, start: pose, end, seconds: 25 }); });
-        select({ kind: 'cameraPaths', id });
-        toast('Camera path added from the current view');
+        addCameraPath();
+    } else if (p.type === 'cameraAuto') {
+        generatePaths();
     } else if (p.type === 'brCircle') {
         if (state.doc.brCircle) { select({ kind: 'brCircle', id: 'brCircle' }); return; }
         const xs = state.doc.blocks.map((b) => b.position);
@@ -360,17 +417,23 @@ function renderInspector() {
             (ids) => editSelected((s) => { s.links = ids; })));
         root.append(el('p', { class: 'empty' }, 'Links work both ways in game. With “Link new nav nodes” on, each node you place connects to the selected one.'));
     } else if (kind === 'cameraPaths') {
-        const pose = (label, key) => el('div', { class: 'card' },
-            el('div', { class: 'card-head' }, el('strong', {}, label),
-                el('button', { type: 'button', onclick: () => { const p = viewport.viewPose(); editSelected((c) => { c[key] = p; }); toast(`${label} set from the view`); } }, 'Use current view')),
+        const part = state.selection.part;
+        const pose = (label, key) => el('div', { class: 'card', style: part === key ? 'border-color: var(--accent)' : '' },
+            el('div', { class: 'card-head' }, el('strong', {}, `${label} shot`),
+                el('button', { type: 'button', title: 'Look through this camera and fly it into place (Enter saves)', onclick: () => frameShot(item.id, key) }, 'Frame shot'),
+                el('button', { type: 'button', title: 'Move this camera with the gizmo', onclick: () => select({ kind: 'cameraPaths', id: item.id, part: key }) }, 'Move')),
             vecField('Position', item[key].position, (v) => editSelected((c) => { c[key].position = v; })),
             el('div', { class: 'row' },
                 numberField('Yaw', item[key].yaw, (v) => editSelected((c) => { c[key].yaw = v; }), { step: 5 }),
                 numberField('Pitch', item[key].pitch, (v) => editSelected((c) => { c[key].pitch = Math.max(-89, Math.min(89, v)); }), { step: 5 })));
         root.append(pose('Start', 'start'), pose('End', 'end'));
         root.append(numberField('Duration (seconds)', item.seconds ?? 25, (v) => editSelected((c) => { c.seconds = Math.max(1, v); }), { step: 1, min: 1 }));
-        root.append(el('button', { type: 'button', onclick: () => viewport.playFlyover(item) }, 'Preview this camera move'));
-        root.append(el('p', { class: 'empty' }, 'The menu camera plays each path in turn before a match. Most maps have about six.'));
+        root.append(el('div', { class: 'row' },
+            el('button', { type: 'button', onclick: () => viewport.playFlyover(item) }, 'Preview this path'),
+            el('button', { type: 'button', onclick: playMenuLoop }, 'Play menu loop')));
+        const total = state.doc.cameraPaths.reduce((s, c) => s + (c.seconds || 25), 0);
+        root.append(el('p', { class: 'empty' }, `The menu camera plays each path in turn before a match (${state.doc.cameraPaths.length} paths, ${total} s loop). Most maps have about six. Frame shot: right-drag to look, WASD to move, Q/E down/up, Shift faster, scroll for speed, Enter to save.`));
+        root.append(el('button', { type: 'button', onclick: generatePaths }, 'Generate 6 paths around the map'));
     } else if (kind === 'brCircle') {
         root.append(vecField('Centre', item.position, (v) => editSelected((c) => { c.position = v; })));
         root.append(numberField('Radius (m)', item.radius, (v) => editSelected((c) => { c.radius = Math.max(5, v); }), { step: 5, min: 5 }));
@@ -656,7 +719,7 @@ function buildPalettes() {
         const piece = { kind: 'object', key: `o:${p.label}`, ...p };
         const sw = el('span', { class: 'swatch round' });
         sw.style.background = p.color;
-        objs.append(el('button', { type: 'button', class: 'piece', 'data-key': piece.key, onclick: () => (p.instant ? addInstantPiece(p) : setTool('place', piece)) }, sw, p.label));
+        objs.append(el('button', { type: 'button', class: 'piece', 'data-key': piece.key, title: p.title, onclick: () => (p.instant ? addInstantPiece(p) : setTool('place', piece)) }, sw, p.label));
     }
 }
 
@@ -681,6 +744,9 @@ function bindUi() {
     $('#btn-redo').addEventListener('click', redo);
     $('#btn-export').addEventListener('click', openExport);
     $('#btn-images').addEventListener('click', openImages);
+    $('#frame-save').addEventListener('click', () => viewport.endFraming(true));
+    $('#frame-cancel').addEventListener('click', () => viewport.endFraming(false));
+    $('#work-light').addEventListener('change', (e) => viewport.setWorkLight(e.target.checked));
     $('#images-view').addEventListener('change', () => renderImages().catch((e) => toast(`Could not render the images: ${e.message}`)));
     $('#download-thumb').addEventListener('click', () => downloadImage('thumb'));
     $('#download-large').addEventListener('click', () => downloadImage('large'));
@@ -702,7 +768,12 @@ function bindUi() {
         else if (k === 'r') setGizmo('scale');
         else if (k === 'f') viewport.frameSelection();
         else if (k === 'delete' || k === 'backspace') { e.preventDefault(); deleteSelected(); }
-        else if (k === 'escape') { viewport.stopFlyover(); if (state.tool === 'place') setTool('select'); else select(null); }
+        else if (k === 'escape') {
+            // Esc first stops a playing camera preview; only a second Esc stops placing or deselects.
+            if (viewport.flyover) { viewport.stopFlyover(); toast('Camera preview stopped'); }
+            else if (state.tool === 'place') setTool('select');
+            else select(null);
+        }
     });
 }
 function setGizmo(mode) {
