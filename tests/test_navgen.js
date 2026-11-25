@@ -50,7 +50,9 @@ check(stats.nodes > 100 && stats.links > stats.nodes, `a 60x60 map gets a dense 
 
 // No node inside a solid or under the low ceiling.
 const inBox = (p, cx, cz, hx, hz) => Math.abs(p.x - cx) < hx && Math.abs(p.z - cz) < hz;
-check(!nodes.some((n) => inBox(n.position, 18, -18, 1.5 + 0.35, 1.5 + 0.35)), 'no node inside or hugging the pillar');
+// Distance from a node to the pillar's 3 x 3 footprint must leave room for the body (0.897).
+const toPillar = (p) => Math.hypot(Math.max(0, Math.abs(p.x - 18) - 1.5), Math.max(0, Math.abs(p.z + 18) - 1.5));
+check(!nodes.some((n) => toPillar(n.position) < 0.897 - 0.05), `no node inside or hugging the pillar (closest ${Math.min(...nodes.map((n) => toPillar(n.position))).toFixed(2)})`);
 check(!nodes.some((n) => inBox(n.position, -18, -18, 4, 4) && n.position.y < 1), 'no node under the low ceiling');
 check(!nodes.some((n) => Math.abs(n.position.x) < 0.6 && Math.abs(n.position.z) > 2.5), 'no node inside the wall');
 check(nodes.some((n) => Math.abs(n.position.y - 2.1) < 0.01 && inBox(n.position, 18, 18, 5, 5)), 'nodes on the east platform');

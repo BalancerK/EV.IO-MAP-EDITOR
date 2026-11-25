@@ -208,6 +208,46 @@ async function main() {
     await evaluate(`document.querySelector('#nav-dialog').close()`);
     check((await evaluate(`document.querySelector('#btn-images').textContent`)) === 'Export images', 'the images button reads "Export images"');
 
+    // ---- item 3: walk test (headless has no pointer lock: the view falls back to drag-to-look)
+    {
+        await evaluate(`window.__mapEditor.viewport.camera.position.set(30, 25, 30)`);
+        await sleep(200);
+        const editorCam = await evaluate(`window.__mapEditor.viewport.camera.position.toArray()`);
+        const gizmoBefore = await evaluate(`document.querySelector('[data-gizmo].active').dataset.gizmo`);
+        await press('#btn-walk');
+        await sleep(1500);   // drop onto the floor
+        check(!(await evaluate(`document.querySelector('#walk-hud').hidden`)), 'Walk test shows its HUD');
+        const p0 = await evaluate(`(() => { const w = window.__mapEditor.viewport.walk; return { ...w.player.pos, grounded: w.player.grounded, cam: window.__mapEditor.viewport.camera.position.y }; })()`);
+        check(p0.grounded && Math.abs(p0.cam - p0.y - 1.8) < 0.05, `starts standing at a spawn with the game's eye height (feet ${p0.y.toFixed(2)}, eye +${(p0.cam - p0.y).toFixed(2)})`);
+        await keyPress('w', 'KeyW', 87, 0, 700);
+        const p1 = await evaluate(`({ ...window.__mapEditor.viewport.walk.player.pos })`);
+        const walked = Math.hypot(p1.x - p0.x, p1.z - p0.z);
+        check(walked > 3, `holding W walks (${walked.toFixed(1)} m in 0.7 s)`);
+        check((await evaluate(`document.querySelector('[data-gizmo].active').dataset.gizmo`)) === gizmoBefore, 'walking keys do not reach the editor shortcuts');
+        await send('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, text: ' ' });
+        await send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
+        await sleep(300);
+        const p2 = await evaluate(`({ ...window.__mapEditor.viewport.walk.player.pos })`);
+        check(p2.y > p1.y + 1.5, `Space jumps (feet ${p1.y.toFixed(2)} -> ${p2.y.toFixed(2)} after 0.3 s)`);
+        const yaw0 = await evaluate(`window.__mapEditor.viewport.walk.yaw`);
+        const mid = await evaluate(`(() => { const r = document.querySelector('#viewport').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+        const selBefore = await selCount();
+        await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: mid.x, y: mid.y, button: 'left', clickCount: 1 });
+        for (let i = 1; i <= 5; i++) await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: mid.x + i * 30, y: mid.y, button: 'left', buttons: 1 });
+        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: mid.x + 150, y: mid.y, button: 'left', clickCount: 1 });
+        await sleep(200);
+        const yaw1 = await evaluate(`window.__mapEditor.viewport.walk.yaw`);
+        check(Math.abs(yaw1 - yaw0) > 5, `dragging turns the view (yaw ${yaw0.toFixed(0)} -> ${yaw1.toFixed(0)})`);
+        check((await selCount()) === selBefore, 'clicking in the walk test does not select or deselect');
+        await sleep(800);
+        const img = await send('Page.captureScreenshot', { format: 'png' });
+        fs.writeFileSync(shot.replace(/\.png$/, '-walk.png'), Buffer.from(img.result.data, 'base64'));
+        await keyPress('Escape', 'Escape', 27);
+        check(await evaluate(`document.querySelector('#walk-hud').hidden && !window.__mapEditor.viewport.walk`), 'Esc leaves the walk test');
+        const back = await evaluate(`window.__mapEditor.viewport.camera.position.toArray()`);
+        check(Math.hypot(back[0] - editorCam[0], back[1] - editorCam[1], back[2] - editorCam[2]) < 1e-3, 'leaving restores the editor view');
+    }
+
     await press('#btn-export');
     await sleep(300);
     const exportText = await evaluate(`document.querySelector('#export-body').innerText`);

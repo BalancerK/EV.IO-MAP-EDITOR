@@ -198,6 +198,37 @@ input[type="range"] { accent-color: var(--accent); width: 100%; }
 .frame-banner[hidden] { display: none; }
 .frame-text { flex: 1; min-width: 220px; display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--text-dim); }
 .frame-text strong { color: var(--camera); font-size: 13px; }
+.walk-hud { position: absolute; inset: 0; pointer-events: none; }
+.walking .hud, .walking .hud-right { display: none; }
+.walk-hud[hidden] { display: none; }
+.walk-bar {
+    position: absolute; top: 12px; left: 12px; right: 12px;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 10px 12px;
+    background: rgba(15, 20, 25, 0.86);
+    border: 1px solid var(--spawn);
+    border-radius: var(--radius);
+    pointer-events: auto;
+}
+.walk-bar .frame-text strong { color: var(--spawn); }
+.walk-spawn { color: var(--text-dim); font-weight: 400; margin-left: 6px; }
+.walk-stats { display: flex; gap: 14px; margin: 0; }
+.walk-stats div { display: flex; flex-direction: column; align-items: flex-end; }
+.walk-stats dt { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); }
+.walk-stats dd { margin: 0; font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; min-width: 7ch; text-align: right; }
+.walk-stats dd.sprint { color: var(--accent); }
+.walk-cross { position: absolute; left: 50%; top: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px; }
+.walk-cross::before, .walk-cross::after { content: ''; position: absolute; background: rgba(255, 255, 255, 0.85); box-shadow: 0 0 2px rgba(0, 0, 0, 0.8); }
+.walk-cross::before { left: 6px; top: 0; width: 2px; height: 14px; }
+.walk-cross::after { top: 6px; left: 0; height: 2px; width: 14px; }
+.walk-paused {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, 28px);
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    padding: 12px 18px; background: rgba(15, 20, 25, 0.9); border: 1px solid var(--line); border-radius: var(--radius);
+    font-size: 12px; color: var(--text-dim);
+}
+.walk-paused[hidden] { display: none; }
+.walk-paused strong { font-family: var(--font-display); color: var(--text); font-size: 15px; letter-spacing: 0.06em; text-transform: uppercase; }
 kbd { font-family: var(--font-mono); font-size: 10px; padding: 0 4px; border: 1px solid currentColor; border-radius: 3px; opacity: 0.7; margin-left: 4px; }
 
 /* ---------- right panel ---------- */

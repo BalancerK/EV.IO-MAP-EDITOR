@@ -33,6 +33,7 @@
             <button id="btn-undo" type="button" title="Undo (Ctrl+Z)">Undo</button>
             <button id="btn-redo" type="button" title="Redo (Ctrl+Y)">Redo</button>
             <span class="sep" aria-hidden="true"></span>
+            <button id="btn-walk" type="button" title="Walk the map in first person, with ev.io's movement (P)">Walk test</button>
             <button id="btn-images" type="button" title="Export the thumbnail and large image ev.io's map upload form asks for">Export images</button>
             <button id="btn-export" type="button" class="primary" title="Export the map as an .evmap file for ev.io">Export .evmap</button>
         </nav>
@@ -89,6 +90,25 @@
                 <span id="hud-hint">Left-click to select · Right-drag to orbit · Middle-drag to pan · Scroll to zoom</span>
             </div>
             <div class="hud-right"><span id="hud-coords" class="mono">x —  y —  z —</span></div>
+            <div id="walk-hud" class="walk-hud" hidden>
+                <div class="walk-bar">
+                    <div class="frame-text">
+                        <strong>Walk test <span id="walk-spawn" class="walk-spawn"></span></strong>
+                        <span>Mouse to look · <kbd>WASD</kbd> move · <kbd>Space</kbd> jump, again in the air to double jump · <kbd>Shift</kbd> sprint · <kbd>C</kbd> crouch · <kbd>R</kbd> next spawn</span>
+                    </div>
+                    <dl class="walk-stats">
+                        <div><dt>Speed</dt><dd id="walk-speed" class="mono">0.0 m/s</dd></div>
+                        <div><dt>Jumps</dt><dd id="walk-jumps" class="mono">2</dd></div>
+                        <div><dt>Height</dt><dd id="walk-height" class="mono">0.0 m</dd></div>
+                    </dl>
+                    <button id="walk-exit" type="button">Leave <kbd>Esc</kbd></button>
+                </div>
+                <div class="walk-cross" aria-hidden="true"></div>
+                <div id="walk-paused" class="walk-paused" hidden>
+                    <strong>Paused</strong>
+                    <span>Click the view to keep walking · <kbd>Esc</kbd> to leave</span>
+                </div>
+            </div>
             <div id="frame-banner" class="frame-banner" hidden>
                 <div class="frame-text">
                     <strong id="frame-label">Framing a camera shot</strong>

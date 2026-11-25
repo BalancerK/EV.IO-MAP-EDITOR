@@ -9,15 +9,16 @@
 //   link      walking a straight line in WALK_STEP increments, every step stays on floor, climbs at
 //             most STEP_HEIGHT, drops at most MAX_DROP, and never enters a solid or a low ceiling
 //
-// The body sizes are approximations of the ev.io player, chosen to be conservative.
+// The body sizes are the ev.io player's (the client's PLAYER_HEIGHT, PLAYER_RADIUS and STEP_UP_MAX);
+// a link may drop no more than it could climb back, because bots use every link both ways.
 import { buildBlockTriangles, rotationMatrix } from './geometry.js';
 import { COLLISION, newId } from './document.js';
 
 export const NAV = {
-    PLAYER_HEIGHT: 1.8,
-    PLAYER_RADIUS: 0.35,
-    STEP_HEIGHT: 0.55,
-    MAX_DROP: 0.75,
+    PLAYER_HEIGHT: 2.86,
+    PLAYER_RADIUS: 0.897,
+    STEP_HEIGHT: 0.8,
+    MAX_DROP: 0.8,
     MAX_SLOPE_DEG: 45,
     WALK_STEP: 0.25,
     KILL_Y: -30,
@@ -109,6 +110,7 @@ function floorNear(col, x, z, y) {
 }
 
 /** Walkable floor points in the column at (x, z) (one per level). */
+const RING = [[1, 0], [-1, 0], [0, 1], [0, -1], [0.7071, 0.7071], [-0.7071, 0.7071], [0.7071, -0.7071], [-0.7071, -0.7071]];
 function floorsAt(col, x, z) {
     const out = [];
     for (const h of col.column(x, z)) {
@@ -116,7 +118,7 @@ function floorsAt(col, x, z) {
         if (!bodyFree(col, x, h.y, z)) continue;
         // Room for a body: the same floor (or a step of it) all around, and no wall within reach.
         let ok = true;
-        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        for (const [dx, dz] of RING) {
             const ox = x + dx * NAV.PLAYER_RADIUS, oz = z + dz * NAV.PLAYER_RADIUS;
             const f = floorNear(col, ox, oz, h.y);
             if (f === null || Math.abs(f - h.y) > NAV.STEP_HEIGHT || !bodyFree(col, ox, f, oz)) { ok = false; break; }

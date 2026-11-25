@@ -22,6 +22,10 @@ server (for example `python -m http.server`) and open `index.html`.
 - **Gameplay objects**: free-for-all and team spawns with facing, weapon spawns, teleporters with
   links (placing one right after another pairs them), bot nav nodes (chained as you place them),
   battle royale circle.
+- **Walk test**: play the map in first person (button or **P**) with ev.io's own movement numbers:
+  walking and sprint speed, acceleration, air control, gravity, jump height and double jump, the
+  player's size and step-up height, teleporters and the kill zone. Check that every jump can be
+  made, every doorway fits and every spawn leads somewhere before you upload.
 - **Bot nav nodes, generated**: *Auto nav* fills every walkable floor with nodes and links the ones a
   bot can walk between (up ramps and stairs, through doorways; never through walls, off ledges or
   under low ceilings), then reports separate areas and spawns bots cannot reach. The checklist keeps
@@ -77,6 +81,9 @@ that structure:
 ```
 node tests/test_roundtrip.js path/to/official.evmap   # read -> write -> read an official map
 node tests/test_compile.js                            # shapes, winding, camera maths, physics load
+node tests/test_edit.js                               # selection, copy/paste, mirror
+node tests/test_navgen.js                             # bot nav generation, server pathfinder
+node tests/test_walk.js                               # walk-test movement and collision
 python -m http.server 8765 --bind 127.0.0.1           # then, in another terminal:
 node tests/browser_smoke.js                           # real mouse events in headless Chrome
 ```

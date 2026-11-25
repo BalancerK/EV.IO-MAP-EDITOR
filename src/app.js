@@ -137,6 +137,11 @@ const viewport = new Viewport($('#viewport'), {
     onFlyoverEnd() { toast('Camera preview finished'); },
     onFlyover(i, n) { if (n > 1) toast(`Menu loop: camera path ${i + 1} of ${n} · Esc to stop`); },
     onFramingChange(f) { renderFramingBanner(f); },
+    onWalkChange(info) { renderWalkHud(info); },
+    onWalkEvent(kind) {
+        if (kind === 'fell') toast('Fell into the kill zone: back to the spawn');
+        else if (kind === 'respawned') toast('Next spawn');
+    },
 });
 
 const sameSel = (a, b) => a.kind === b.kind && a.id === b.id;
@@ -402,6 +407,36 @@ function playMenuLoop() {
     viewport.playFlyover(state.doc.cameraPaths);
 }
 
+// ------------------------------------------------------------------ walk test
+// Start at the selected player spawn, else the spawn nearest the middle of the view, else drop in
+// from the camera. R cycles through the spawns; falling into the kill zone returns to the last one.
+function startWalkTest() {
+    const doc = state.doc;
+    if (!doc.blocks.some((b) => b.collision !== 'visual')) { toast('Nothing to walk on yet: add a solid block first'); return; }
+    const spawns = doc.playerSpawns.map((s) => ({ position: { ...s.position }, yaw: s.yaw || 0 }));
+    let idx = state.selection?.kind === 'playerSpawns' ? doc.playerSpawns.findIndex((s) => s.id === state.selection.id) : -1;
+    if (idx < 0 && spawns.length) {
+        const t = viewport.orbit.target;
+        let best = Infinity;
+        spawns.forEach((s, i) => { const d = (s.position.x - t.x) ** 2 + (s.position.y - t.y) ** 2 + (s.position.z - t.z) ** 2; if (d < best) { best = d; idx = i; } });
+    }
+    const start = idx >= 0 ? { ...spawns[idx], spawnIndex: idx } : { position: viewport.viewPose().position, yaw: viewport.viewPose().yaw };
+    viewport.startWalk(doc, start, { spawns });
+}
+function renderWalkHud(info) {
+    const hud = $('#walk-hud');
+    document.querySelector('.viewport-wrap').classList.toggle('walking', !!info);
+    if (!info) { hud.hidden = true; return; }
+    hud.hidden = false;
+    $('#walk-spawn').textContent = info.spawn ? `spawn ${info.spawn}` : '';
+    const speed = $('#walk-speed');
+    speed.textContent = `${info.speed.toFixed(1)} m/s`;
+    speed.classList.toggle('sprint', info.sprinting);
+    $('#walk-jumps').textContent = String(info.jumpsLeft);
+    $('#walk-height').textContent = `${info.height.toFixed(1)} m`;
+    $('#walk-paused').hidden = !info.paused;
+}
+
 function renderFramingBanner(f) {
     const b = $('#frame-banner');
     if (!f) { b.hidden = true; return; }
@@ -588,6 +623,7 @@ function renderInspector() {
                 el('dt', {}, 'Move the view'), el('dd', {}, 'Arrows, PgUp/PgDn'),
                 el('dt', {}, 'Delete'), el('dd', {}, 'Del'),
                 el('dt', {}, 'Frame selection'), el('dd', {}, 'F'),
+                el('dt', {}, 'Walk test'), el('dd', {}, 'P'),
                 el('dt', {}, 'Undo / redo'), el('dd', {}, 'Ctrl+Z / Ctrl+Y'))));
         return;
     }
@@ -976,6 +1012,8 @@ function bindUi() {
     $('#btn-export').addEventListener('click', openExport);
     $('#btn-images').addEventListener('click', openImages);
     $('#nav-generate').addEventListener('click', runNavGeneration);
+    $('#btn-walk').addEventListener('click', startWalkTest);
+    $('#walk-exit').addEventListener('click', () => viewport.endWalk());
     $('#frame-save').addEventListener('click', () => viewport.endFraming(true));
     $('#frame-cancel').addEventListener('click', () => viewport.endFraming(false));
     $('#work-light').addEventListener('change', (e) => viewport.setWorkLight(e.target.checked));
@@ -1017,6 +1055,7 @@ function bindUi() {
         else if (k === 'e') setGizmo('rotate');
         else if (k === 'r') setGizmo('scale');
         else if (k === 'f') viewport.frameSelection();
+        else if (k === 'p') startWalkTest();
         else if (e.key === '[') rotateSelection(90);
         else if (e.key === ']') rotateSelection(-90);
         else if (k === 'h' && e.shiftKey) showAll();

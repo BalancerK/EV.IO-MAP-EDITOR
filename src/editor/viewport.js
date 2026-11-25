@@ -7,6 +7,7 @@ import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { buildBlockTriangles } from '../model/geometry.js';
 import { lightDirection, cameraForward, hexToRgb, shadowSettingsFor } from '../model/compile.js';
 import { COLLISION } from '../model/document.js';
+import { buildWalkWorld, newPlayer, stepPlayer, PLAYER } from '../model/walk.js';
 
 const COLORS = { spawn: 0x4fd47a, team1: 0x4f8fff, team2: 0xff8a3d, weapon: 0xb07cff, teleport: 0xff5d5d, nav: 0xffd84a, camera: 0x4cc9f0, select: 0xf0a830, br: 0xff5d5d, kill: 0xff3b30 };
 const KILL_Y = -30;
@@ -161,6 +162,8 @@ export class Viewport {
         this.pointer = new THREE.Vector2();
         this.bindPointer();
         this.bindFramingInput();
+        this.walk = null;
+        this.bindWalkInput();
         this.bindArrowKeys();
         this.resizeObserver = new ResizeObserver(() => this.resize());
         this.resizeObserver.observe(container);
@@ -181,10 +184,11 @@ export class Viewport {
         const now = performance.now();
         const dt = Math.min(0.1, (now - (this._lastFrame || now)) / 1000);
         this._lastFrame = now;
-        if (this.framing) this.stepFraming(dt);
+        if (this.walk) this.stepWalk(dt);
+        else if (this.framing) this.stepFraming(dt);
         else if (this.flyover) this.stepFlyover();
         else this.orbit.update();
-        if (!this.framing && !this.flyover) this.stepArrowKeys(dt);
+        if (!this.framing && !this.flyover && !this.walk) this.stepArrowKeys(dt);
         if (this.selectionBox.visible && this.selectedObject3D()) this.selectionBox.update();
         for (const b of this.extraBoxes) if (b.visible && b.userData.obj) b.update();
         this.sky.position.copy(this.camera.position);
@@ -470,12 +474,13 @@ export class Viewport {
             const d = down;
             down = null;
             if (this.marqueeActive) { this.finishMarquee(d, e); return; }
-            if (moved || this.gizmo.dragging || this.gizmoHovered || this.framing) return;
+            if (moved || this.gizmo.dragging || this.gizmoHovered || this.framing || this.walk) return;
             this.updatePointer(e);
             if (this.tool === 'place') this.placeAtPointer();
             else this.pickAtPointer(e.shiftKey || e.ctrlKey || e.metaKey);
         });
         el.addEventListener('pointermove', (e) => {
+            if (this.walk) return;
             if (down && !down.onGizmo && this.tool === 'select' && !this.framing && !this.gizmo.dragging
                 && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) this.drawMarquee(down, e);
             this.updatePointer(e);
@@ -726,6 +731,160 @@ export class Viewport {
             this.framing.speed = Math.max(2, Math.min(120, this.framing.speed * (e.deltaY > 0 ? 0.85 : 1.18)));
             this.cb.onFramingChange?.(this.framing);
         }, { passive: false });
+    }
+
+    // ------------------------------------------------------------------ walk test
+    // Play the map in first person with ev.io's movement (src/model/walk.js), at the game's 20
+    // ticks a second, drawn smoothly in between. The view shows only what the game shows.
+    // start: { position, yaw, spawnIndex? }. spawns: the map's player spawns, for respawning.
+    startWalk(doc, start, { spawns = [], onExit } = {}) {
+        this.stopFlyover();
+        if (this.framing) this.endFraming(false);
+        if (this.walk) this.endWalk();
+        const world = buildWalkWorld(doc);
+        const player = newPlayer(start.position, start.yaw || 0);
+        const invisibleWalls = this.contentRoot.children.filter((m) => m.userData.invisible);
+        const hide = [this.gridHelper, this.killPlane, this.gizmo, this.selectionBox, ...this.extraBoxes, this.ghost, this.objectRoot, ...invisibleWalls];
+        this.walk = {
+            world, player, prev: { ...player.pos }, acc: 0, keys: new Set(), jump: false,
+            yaw: start.yaw || 0, pitch: 0, eye: PLAYER.EYE, spawns, spawnIndex: start.spawnIndex ?? -1, start,
+            onExit, locked: false, paused: false, hudAt: 0, falls: 0, dragging: false,
+            hidden: hide.map((o) => [o, o.visible]),
+            restore: { position: this.camera.position.clone(), target: this.orbit.target.clone(), workLight: this.ambient.intensity },
+        };
+        for (const o of hide) o.visible = false;
+        this.marqueeEl.hidden = true;
+        this.ambient.intensity = 0;
+        this.orbit.enabled = false;
+        this.navKeys.clear();
+        this.lockPointer();
+        this.cb.onWalkChange?.(this.walkInfo());
+    }
+    endWalk() {
+        const w = this.walk;
+        if (!w) return;
+        this.walk = null;
+        for (const [o, v] of w.hidden) o.visible = v;
+        this.ambient.intensity = w.restore.workLight;
+        this.camera.position.copy(w.restore.position);
+        this.orbit.target.copy(w.restore.target);
+        this.camera.lookAt(this.orbit.target);
+        this.orbit.enabled = true;
+        if (document.pointerLockElement === this.renderer.domElement) document.exitPointerLock?.();
+        this.attachGizmo();
+        this.cb.onWalkChange?.(null);
+        w.onExit?.();
+    }
+    lockPointer() {
+        const el = this.renderer.domElement;
+        try {
+            const p = el.requestPointerLock?.();
+            if (p && p.catch) p.catch(() => { /* no pointer lock (e.g. headless): drag to look */ });
+        } catch { /* drag to look */ }
+    }
+    respawnWalk(next = true) {
+        const w = this.walk;
+        let pose = w.start;
+        if (w.spawns.length) {
+            w.spawnIndex = next ? (w.spawnIndex + 1) % w.spawns.length : Math.max(0, w.spawnIndex);
+            pose = w.spawns[w.spawnIndex];
+        }
+        w.player = newPlayer(pose.position, pose.yaw || 0);
+        w.prev = { ...w.player.pos };
+        w.yaw = pose.yaw || 0; w.pitch = 0; w.acc = 0;
+    }
+    stepWalk(dt) {
+        const w = this.walk, T = 1 / PLAYER.TICK_RATE;
+        if (!w.paused) {
+            w.acc = Math.min(w.acc + dt, T * 5);
+            while (w.acc >= T) {
+                w.acc -= T;
+                w.prev = { ...w.player.pos };
+                const k = w.keys;
+                const ev = stepPlayer(w.world, w.player, {
+                    forward: k.has('w'), back: k.has('s'), left: k.has('a'), right: k.has('d'),
+                    sprint: k.has('shift'), crouch: k.has('c'), jump: w.jump, yaw: w.yaw,
+                });
+                w.jump = false;
+                if (ev.teleported) { w.yaw = w.player.yaw; w.prev = { ...w.player.pos }; this.cb.onWalkEvent?.('teleported'); }
+                if (ev.died) { w.falls++; this.respawnWalk(false); this.cb.onWalkEvent?.('fell'); }
+            }
+        }
+        const a = w.paused ? 1 : w.acc / T, p = w.player;
+        const eyeTarget = p.crouching ? PLAYER.EYE_CROUCH : PLAYER.EYE;
+        w.eye += (eyeTarget - w.eye) * Math.min(1, dt * 12);
+        this.camera.position.set(lerp(w.prev.x, p.pos.x, a), lerp(w.prev.y, p.pos.y, a) + w.eye, lerp(w.prev.z, p.pos.z, a));
+        this.camera.rotation.set(deg(w.pitch), deg(w.yaw), 0, 'YXZ');
+        const now = performance.now();
+        if (now - w.hudAt > 100) { w.hudAt = now; this.cb.onWalkChange?.(this.walkInfo()); }
+    }
+    walkInfo() {
+        const w = this.walk, p = w.player;
+        return {
+            speed: Math.hypot(p.vel.x, p.vel.z) * PLAYER.TICK_RATE, height: p.pos.y, grounded: p.grounded,
+            jumpsLeft: p.grounded ? PLAYER.MAX_JUMPS : PLAYER.MAX_JUMPS - p.jumps, sprinting: p.sprinting, crouching: p.crouching,
+            locked: w.locked, paused: w.paused, falls: w.falls,
+            spawn: w.spawns.length ? (Math.max(0, w.spawnIndex) + 1) + ' of ' + w.spawns.length : null,
+        };
+    }
+    bindWalkInput() {
+        const el = this.renderer.domElement;
+        const MAP = { w: 'w', arrowup: 'w', s: 's', arrowdown: 's', a: 'a', arrowleft: 'a', d: 'd', arrowright: 'd', shift: 'shift', c: 'c' };
+        window.addEventListener('keydown', (e) => {
+            const w = this.walk;
+            if (!w || /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName)) return;
+            e.stopImmediatePropagation();
+            const k = e.key.toLowerCase();
+            if (k === 'escape') { e.preventDefault(); this.endWalk(); return; }
+            if (e.ctrlKey || e.metaKey) return;   // leave browser shortcuts alone
+            e.preventDefault();
+            if (k === ' ' && !e.repeat) w.jump = true;
+            else if (k === 'r' && !e.repeat) { this.respawnWalk(true); this.cb.onWalkEvent?.('respawned'); }
+            else if (MAP[k]) w.keys.add(MAP[k]);
+        }, true);
+        window.addEventListener('keyup', (e) => {
+            if (!this.walk) return;
+            const k = MAP[e.key.toLowerCase()];
+            if (k) this.walk.keys.delete(k);
+        }, true);
+        window.addEventListener('blur', () => { if (this.walk) this.walk.keys.clear(); });
+        document.addEventListener('pointerlockchange', () => {
+            const w = this.walk;
+            if (!w) return;
+            const locked = document.pointerLockElement === el;
+            // Esc releases the pointer first (the browser keeps that Esc to itself): pause, and let a
+            // click resume or a second Esc leave.
+            if (w.locked && !locked) { w.paused = true; w.keys.clear(); }
+            if (locked) w.paused = false;
+            w.locked = locked;
+            this.cb.onWalkChange?.(this.walkInfo());
+        });
+        const look = (dx, dy) => {
+            const w = this.walk;
+            w.yaw = ((w.yaw - dx * 0.12) % 360 + 360) % 360;
+            w.pitch = Math.max(-89, Math.min(89, w.pitch - dy * 0.12));
+        };
+        document.addEventListener('mousemove', (e) => {
+            const w = this.walk;
+            if (w && w.locked && document.pointerLockElement === el) look(e.movementX, e.movementY);
+        });
+        el.addEventListener('pointerdown', (e) => {
+            const w = this.walk;
+            if (!w || w.locked) return;
+            if (w.paused) { this.lockPointer(); return; }
+            w.dragging = true;           // no pointer lock: drag to look
+            el.setPointerCapture?.(e.pointerId);
+            this.lockPointer();
+        });
+        el.addEventListener('pointermove', (e) => {
+            const w = this.walk;
+            if (w && !w.locked && w.dragging) look(e.movementX, e.movementY);
+        });
+        el.addEventListener('pointerup', (e) => {
+            if (!this.walk) return;
+            this.walk.dragging = false;
+            try { el.releasePointerCapture(e.pointerId); } catch { /* not captured */ }
+        });
     }
 
     // ------------------------------------------------------------------ still images
