@@ -57,6 +57,7 @@ async function main() {
         process.exit(2);
     }
     const list = fs.existsSync(LIST) ? JSON.parse(fs.readFileSync(LIST, 'utf8')) : { version: 1, maps: [] };
+    const before = JSON.stringify([...list.maps].sort((a, b) => a.nid - b.nid));
     for (const nid of nids) {
         const before = list.maps.length;
         list.maps = list.maps.filter((m) => m.nid !== nid);
@@ -66,6 +67,10 @@ async function main() {
         console.log(`${before === list.maps.length ? 'refreshed' : 'added'} #${nid} "${entry.title}"${entry.author ? ` by ${entry.author}` : ''} -> ${entry.evmapUrl}`);
     }
     list.maps.sort((a, b) => a.title.localeCompare(b.title));
+    if (JSON.stringify([...list.maps].sort((a, b) => a.nid - b.nid)) === before) {
+        console.log('list unchanged');
+        return;   // leave the file (and its timestamp) alone, so a no-op run commits nothing
+    }
     list.updated = new Date().toISOString();
     fs.mkdirSync(path.dirname(LIST), { recursive: true });
     fs.writeFileSync(LIST, JSON.stringify(list, null, 2) + '\n');
