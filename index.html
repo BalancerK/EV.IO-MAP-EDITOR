@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>EV.IO Map Editor</title>
+    <meta name="description" content="Build ev.io maps in your browser and export them as .evmap files.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+    <link rel="stylesheet" href="styles.css">
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">
+            <span class="brand-mark" aria-hidden="true"></span>
+            <span class="brand-name">EV.IO Map Editor</span>
+        </div>
+        <input id="map-name" class="map-name" type="text" spellcheck="false" aria-label="Map name">
+        <nav class="file-actions" aria-label="File">
+            <button id="btn-new" type="button">New</button>
+            <button id="btn-open" type="button">Open</button>
+            <button id="btn-save" type="button" title="Save the project as a .json file you can open again (Ctrl+S)">Save project</button>
+            <span class="sep" aria-hidden="true"></span>
+            <button id="btn-undo" type="button" title="Undo (Ctrl+Z)">Undo</button>
+            <button id="btn-redo" type="button" title="Redo (Ctrl+Y)">Redo</button>
+            <span class="sep" aria-hidden="true"></span>
+            <button id="btn-export" type="button" class="primary" title="Export the map as an .evmap file for ev.io">Export .evmap</button>
+        </nav>
+        <input id="file-input" type="file" accept=".json,application/json" hidden>
+    </header>
+
+    <main class="workspace">
+        <aside class="panel left" aria-label="Tools">
+            <section class="group">
+                <h2>Tool</h2>
+                <div class="seg" role="radiogroup" aria-label="Tool">
+                    <button type="button" data-tool="select" class="active" title="Select and move (V)">Select</button>
+                    <button type="button" data-tool="place" title="Place the chosen piece (B)">Place</button>
+                </div>
+                <div class="seg gizmo-modes" role="radiogroup" aria-label="Transform">
+                    <button type="button" data-gizmo="translate" class="active" title="Move (W)">Move</button>
+                    <button type="button" data-gizmo="rotate" title="Rotate (E)">Rotate</button>
+                    <button type="button" data-gizmo="scale" title="Resize (R)">Size</button>
+                </div>
+                <label class="field inline">
+                    <span>Grid</span>
+                    <select id="grid-size">
+                        <option value="0.25">0.25 m</option>
+                        <option value="0.5">0.5 m</option>
+                        <option value="1" selected>1 m</option>
+                        <option value="2">2 m</option>
+                        <option value="4">4 m</option>
+                    </select>
+                </label>
+            </section>
+
+            <section class="group">
+                <h2>Blocks</h2>
+                <div class="palette" id="palette-blocks"></div>
+            </section>
+
+            <section class="group">
+                <h2>Gameplay</h2>
+                <div class="palette" id="palette-objects"></div>
+                <label class="check"><input id="chain-nav" type="checkbox" checked> Link new nav nodes to the selected one</label>
+            </section>
+
+            <section class="group grow">
+                <h2>Scene <span id="scene-count" class="count"></span></h2>
+                <ul id="outliner" class="outliner" aria-label="Scene objects"></ul>
+            </section>
+        </aside>
+
+        <section class="viewport-wrap">
+            <div id="viewport" class="viewport" tabindex="0" aria-label="3D view"></div>
+            <div class="hud">
+                <span id="hud-mode">Select</span>
+                <span id="hud-hint">Left-click to select · Right-drag to orbit · Middle-drag to pan · Scroll to zoom</span>
+            </div>
+            <div class="hud-right"><span id="hud-coords" class="mono">x —  y —  z —</span></div>
+        </section>
+
+        <aside class="panel right" aria-label="Properties">
+            <div class="tabs" role="tablist">
+                <button type="button" role="tab" data-tab="inspector" class="active">Selected</button>
+                <button type="button" role="tab" data-tab="materials">Materials</button>
+                <button type="button" role="tab" data-tab="environment">Sky &amp; light</button>
+                <button type="button" role="tab" data-tab="checklist">Checklist <span id="issue-count" class="badge"></span></button>
+            </div>
+            <div class="tab-body" data-body="inspector" id="inspector"></div>
+            <div class="tab-body" data-body="materials" id="materials" hidden></div>
+            <div class="tab-body" data-body="environment" id="environment" hidden></div>
+            <div class="tab-body" data-body="checklist" id="checklist" hidden></div>
+        </aside>
+    </main>
+
+    <dialog id="export-dialog" class="dialog">
+        <form method="dialog">
+            <h2>Export .evmap</h2>
+            <div id="export-body"></div>
+            <div class="dialog-actions">
+                <button value="cancel" type="submit">Close</button>
+                <button id="export-download" value="download" type="submit" class="primary">Download</button>
+            </div>
+        </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <script type="module" src="src/app.js"></script>
+</body>
+</html>
