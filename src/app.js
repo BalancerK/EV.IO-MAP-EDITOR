@@ -573,7 +573,7 @@ function openExport() {
     if (!issues.length) ul.append(el('li', { class: 'ok' }, 'Ready to upload.'));
     for (const i of issues) ul.append(el('li', { class: i.level }, i.text));
     body.append(ul);
-    body.append(el('p', { class: 'empty' }, 'Upload at ev.io/node/add/map with a 166×70 PNG thumbnail and a 1000×451 JPEG image. Until staff approve it, only you can play it (against bots) from Create Game → My maps.'));
+    body.append(el('p', { class: 'empty' }, 'Upload at ev.io/node/add/map with a 166×70 PNG thumbnail and a 2000×902 JPEG large image. Until ev.io staff approve it, you can play it on a custom server.'));
     $('#export-dialog').showModal();
 }
 
