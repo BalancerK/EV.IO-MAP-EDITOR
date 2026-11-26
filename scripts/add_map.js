@@ -15,6 +15,11 @@ const LIST = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'maps
 // Readers accept only map files on ev.io's own file store; refuse anything else up front too.
 export const EVMAP_URL_RE = /^https:\/\/ev\.io\/sites\/default\/files\/maps\/[A-Za-z0-9._%-]+\.evmap$/;
 const IMAGE_URL_RE = /^https:\/\/ev\.io\/sites\/default\/files\/[A-Za-z0-9._%\/-]+\.(png|jpe?g)$/i;
+// The map's background sound (its Ambient Track); readers send it to the game as the room's ambient URL.
+const AMBIENT_URL_RE = /^https:\/\/ev\.io\/sites\/default\/files\/ambient_tracks\/[A-Za-z0-9._%-]+\.(ogg|mp3)$/i;
+// Environment Effect terms on ev.io. The node record gives only the term id (ev.io will not serve the
+// term page itself); readers turn these names into the game's weather flags.
+const EFFECT_TERMS = { 66: 'Snow', 67: 'Rain', 68: 'Lightning', 69: 'Dust' };
 
 const first = (v) => (Array.isArray(v) ? v[0] : v);
 const tidyUrl = (u) => (u ? u.replace('https://ev.io//', 'https://ev.io/') : null);
@@ -43,6 +48,8 @@ async function resolve(nid) {
         evmapUrl,
         thumbUrl: img(node.field_map_thumbnail),
         largeImageUrl: img(node.field_large_image),
+        ambientUrl: (() => { const u = tidyUrl(first(node.field_ambient_track)?.url); return u && AMBIENT_URL_RE.test(u) ? u : null; })(),
+        effects: (node.field_environment_effect || []).map((t) => EFFECT_TERMS[t && t.target_id]).filter(Boolean),
         approvedForPrivateGames: !!first(node.field_allow_private_games)?.value,
         updated: first(node.changed)?.value || null,
     };
