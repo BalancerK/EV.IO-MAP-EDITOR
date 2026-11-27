@@ -4,7 +4,7 @@
 import fs from 'fs';
 import path from 'path';
 import { readEvmap, NODE } from '../src/evmap/format.js';
-import { evmapToGltf, evmapToGlb } from '../src/evmap/gltf.js';
+import { evmapToGltf, evmapToGlb, evmapToGltfFile } from '../src/evmap/gltf.js';
 import { newDocument, newId } from '../src/model/document.js';
 import { compileDocument } from '../src/model/compile.js';
 
@@ -51,6 +51,12 @@ function checkMap(label, m) {
     check(pos.min.length === 3 && pos.min.every(Number.isFinite), `${label}: position bounds finite`);
     console.log(`${label}: ${stats.pieces} pieces, ${stats.meshes} meshes, ${stats.materials} materials, ${stats.textures} textures, ${(bytes.length / 1048576).toFixed(2)} MB`);
     if (process.env.OUT) fs.writeFileSync(path.join(process.env.OUT, `${label}.glb`), bytes);
+    // The .gltf text form carries the same buffer, embedded as base64.
+    const text = evmapToGltfFile(m, { name: label }).bytes;
+    const g = JSON.parse(new TextDecoder().decode(text));
+    const data = Buffer.from(g.buffers[0].uri.split(',')[1], 'base64');
+    check(data.length === g.buffers[0].byteLength && data.equals(Buffer.from(bin)), `${label}: .gltf embeds the same buffer as the .glb`);
+    if (process.env.OUT) fs.writeFileSync(path.join(process.env.OUT, `${label}.gltf`), text);
     return json;
 }
 

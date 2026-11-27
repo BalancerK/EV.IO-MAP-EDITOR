@@ -51,7 +51,7 @@ server (for example `python -m http.server`) and open `index.html`.
   ev.io's upload form asks for, from the current view or any menu camera path, without the
   editor's grid and markers.
 
-- **Export as glTF**: saves the map as a `.glb` (glTF 2.0) model for Blender, the three.js editor
+- **Export as glTF**: saves the map as a `.gltf` (glTF 2.0, one file with everything embedded) model for Blender, the three.js editor
   or any 3D tool: every visible piece with its materials and textures, the sun lights, and empty
   markers for spawns, weapon spawns and teleporters, placed the way players see the map (the game
   mirrors the file in x on load). Works for official maps you open as well as your own. Invisible

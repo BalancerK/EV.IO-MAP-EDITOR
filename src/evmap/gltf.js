@@ -1,4 +1,4 @@
-// .evmap -> glTF 2.0 binary (.glb), for Blender, three.js editor and other 3D tools.
+// .evmap -> glTF 2.0 (.gltf with the data embedded, or binary .glb), for Blender, three.js editor and other 3D tools.
 // Pure JavaScript (no three.js), so it runs in the editor and in Node tests.
 //
 // Input is the structure readEvmap returns (or compileDocument, which has the same shape), so a
@@ -334,6 +334,23 @@ export function packGlb(json, binary) {
         out.set(binary, o + 8);
     }
     return out;
+}
+
+// A single self-contained .gltf (JSON text): the binary buffer is embedded as a base64 data URI.
+function base64(bytes) {
+    if (typeof Buffer !== 'undefined') return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64');
+    let out = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) out += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(out);
+}
+export function packGltf(json, binary) {
+    const doc = { ...json };
+    if (binary && binary.length) doc.buffers = [{ byteLength: binary.length, uri: 'data:application/octet-stream;base64,' + base64(binary) }];
+    return new TextEncoder().encode(JSON.stringify(doc));
+}
+export function evmapToGltfFile(m, opts = {}) {
+    const { json, binary, stats } = evmapToGltf(m, opts);
+    return { bytes: packGltf(json, binary), stats };
 }
 
 export function evmapToGlb(m, opts = {}) {

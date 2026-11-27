@@ -8,7 +8,7 @@ import { generateNavNodes, navReport } from './model/navgen.js';
 import { buildBlockTriangles, blocksBounds } from './model/geometry.js';
 import { collect, remapIds, translate, rotateY, mirror, insert, replace, removeSelection, centreOf, toClipboardText, fromClipboardText } from './model/edit.js';
 import { writeEvmap, readEvmap } from './evmap/format.js';
-import { evmapToGlb } from './evmap/gltf.js';
+import { evmapToGltfFile } from './evmap/gltf.js';
 import { importEvmap } from './model/importer.js';
 import { registerAsset, getAsset, docAsset, docBounds, modelBounds } from './model/assets.js';
 import { fileKey, putFile, getFile, pruneFiles } from './editor/filestore.js';
@@ -991,11 +991,11 @@ function openExport() {
 // lights and empties for spawns, weapon spawns and teleporters. Invisible collision is left out.
 function exportGltf() {
     let out;
-    try { out = evmapToGlb(compileDocument(state.doc), { name: state.doc.name }); }
+    try { out = evmapToGltfFile(compileDocument(state.doc), { name: state.doc.name }); }
     catch (e) { toast(`Could not export glTF: ${e.message}`, 6000); return; }
-    download(out.bytes, `${slug(state.doc.name)}.glb`, 'model/gltf-binary');
+    download(out.bytes, `${slug(state.doc.name)}.gltf`, 'model/gltf+json');
     const mb = out.bytes.length / (1024 * 1024);
-    toast(`Exported ${slug(state.doc.name)}.glb: ${out.stats.pieces} pieces, ${out.stats.materials} materials, ${out.stats.textures} textures (${mb >= 0.1 ? mb.toFixed(2) + ' MB' : (out.bytes.length / 1024).toFixed(1) + ' KB'})`, 5000);
+    toast(`Exported ${slug(state.doc.name)}.gltf: ${out.stats.pieces} pieces, ${out.stats.materials} materials, ${out.stats.textures} textures (${mb >= 0.1 ? mb.toFixed(2) + ' MB' : (out.bytes.length / 1024).toFixed(1) + ' KB'})`, 5000);
 }
 
 // ------------------------------------------------------------------ export images
