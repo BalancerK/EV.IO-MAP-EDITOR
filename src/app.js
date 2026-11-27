@@ -654,7 +654,7 @@ function renderInspector() {
                 el('dt', {}, 'Duplicate'), el('dd', {}, 'Ctrl+D'),
                 el('dt', {}, 'Turn 90°'), el('dd', {}, '[ / ]'),
                 el('dt', {}, 'Hide / show all'), el('dd', {}, 'H / Shift+H'),
-                el('dt', {}, 'Move the view'), el('dd', {}, 'Arrows, PgUp/PgDn'),
+                el('dt', {}, 'Move the view'), el('dd', {}, 'Arrows, Space up, Shift down'),
                 el('dt', {}, 'Delete'), el('dd', {}, 'Del'),
                 el('dt', {}, 'Frame selection'), el('dd', {}, 'F'),
                 el('dt', {}, 'Walk test'), el('dd', {}, 'P'),

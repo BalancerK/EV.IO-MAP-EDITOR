@@ -691,26 +691,46 @@ export class Viewport {
     }
 
     // ------------------------------------------------------------------ arrow keys move the view
-    // Arrow keys slide the editor camera (and what it orbits) across the ground; PageUp/PageDown
-    // raise and lower it; Shift is faster. Speed scales with how far out the camera is.
+    // Arrow keys slide the editor camera (and what it orbits) across the ground; Space and
+    // PageUp raise it, Shift and PageDown lower it. Speed scales with how far out the camera is.
+    // Shift also adds to the selection on click: holding it to Shift-click must not leave the view
+    // lower, so a click while Shift is held puts the camera back where it was when Shift went
+    // down, and it stays put until Shift is released.
     bindArrowKeys() {
-        const keys = { arrowup: 'f', arrowdown: 'b', arrowleft: 'l', arrowright: 'r', pageup: 'u', pagedown: 'd' };
+        const keys = { arrowup: 'f', arrowdown: 'b', arrowleft: 'l', arrowright: 'r', pageup: 'u', pagedown: 'd', ' ': 'space' };
+        const typing = () => /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName);
+        let shiftFrom = null;
         window.addEventListener('keydown', (e) => {
-            if (/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName) || e.ctrlKey || e.metaKey || e.altKey) return;
+            if (typing() || e.ctrlKey || e.metaKey || e.altKey) return;
             const k = keys[e.key.toLowerCase()];
             if (k) { this.navKeys.add(k); e.preventDefault(); }
-            if (e.key === 'Shift') this.navKeys.add('fast');
+            if (e.key === 'Shift' && !e.repeat && !this.navKeys.has('shift') && !this.navKeys.has('shiftHeld')) {
+                this.navKeys.add('shift');
+                shiftFrom = { camera: this.camera.position.clone(), target: this.orbit.target.clone() };
+            }
         });
         window.addEventListener('keyup', (e) => {
             const k = keys[e.key.toLowerCase()];
             if (k) this.navKeys.delete(k);
-            if (e.key === 'Shift') this.navKeys.delete('fast');
+            // Space on a focused button would press it: the view owns Space.
+            if (k === 'space' && !typing()) e.preventDefault();
+            if (e.key === 'Shift') { this.navKeys.delete('shift'); this.navKeys.delete('shiftHeld'); shiftFrom = null; }
         });
-        window.addEventListener('blur', () => this.navKeys.clear());
+        this.renderer.domElement.addEventListener('pointerdown', (e) => {
+            if (!e.shiftKey || !this.navKeys.has('shift')) return;
+            if (shiftFrom && !this.framing && !this.walk && !this.flyover) {
+                const dy = shiftFrom.camera.y - this.camera.position.y;
+                this.camera.position.y += dy;
+                this.orbit.target.y += dy;
+            }
+            this.navKeys.delete('shift');
+            this.navKeys.add('shiftHeld');
+        }, true);
+        window.addEventListener('blur', () => { this.navKeys.clear(); shiftFrom = null; });
     }
     stepArrowKeys(dt) {
         const k = this.navKeys;
-        if (!k.size || (k.size === 1 && k.has('fast'))) return;
+        if (!k.size || (k.size === 1 && k.has('shiftHeld'))) return;
         const fwd = new THREE.Vector3();
         this.camera.getWorldDirection(fwd);
         fwd.y = 0;
@@ -722,11 +742,11 @@ export class Viewport {
         if (k.has('b')) move.sub(fwd);
         if (k.has('r')) move.add(right);
         if (k.has('l')) move.sub(right);
-        if (k.has('u')) move.y += 1;
-        if (k.has('d')) move.y -= 1;
+        if (k.has('u') || k.has('space')) move.y += 1;
+        if (k.has('d') || k.has('shift')) move.y -= 1;
         if (!move.lengthSq()) return;
         const dist = this.camera.position.distanceTo(this.orbit.target);
-        const speed = Math.max(6, dist * 0.9) * (k.has('fast') ? 3 : 1);
+        const speed = Math.max(6, dist * 0.9);
         move.normalize().multiplyScalar(speed * dt);
         this.camera.position.add(move);
         this.orbit.target.add(move);
