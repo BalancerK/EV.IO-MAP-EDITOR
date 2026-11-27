@@ -8,15 +8,29 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
-    <link rel="stylesheet" href="styles.css">
-    <script type="importmap">
-    {
-        "imports": {
-            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
-            "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.7.3/build/index.module.js"
-        }
-    }
+    <!--
+        Every deploy loads fresh code. GitHub Pages lets browsers reuse a cached script for up to
+        10 minutes, and a reload refetches only this page, so a new page could run with old
+        scripts (a new button that did nothing). This page's Last-Modified changes with each deploy:
+        it versions the stylesheet, the entry script and, through the import map, every module.
+        MODULES must list every file in src/ (tests/test_modules_listed.js checks it).
+    -->
+    <script>
+    (function () {
+        var MODULES = ['app.js', 'editor/filestore.js', 'editor/viewport.js', 'evmap/binary.js', 'evmap/format.js',
+            'evmap/gltf.js', 'model/assets.js', 'model/compile.js', 'model/document.js', 'model/edit.js',
+            'model/geometry.js', 'model/importer.js', 'model/navgen.js', 'model/walk.js'];
+        var v = String(Date.parse(document.lastModified) || Date.now());
+        var imports = {
+            'three': 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js',
+            'three/addons/': 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/',
+            'three-mesh-bvh': 'https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.7.3/build/index.module.js'
+        };
+        MODULES.forEach(function (m) { imports[new URL('src/' + m, location.href).href] = './src/' + m + '?v=' + v; });
+        window.__EDITOR_VERSION__ = v;
+        document.write('<link rel="stylesheet" href="styles.css?v=' + v + '">');
+        document.write('<script type="importmap">' + JSON.stringify({ imports: imports }) + '<\/script>');
+    })();
     </script>
 </head>
 <body>
@@ -195,6 +209,6 @@
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-    <script type="module" src="src/app.js"></script>
+    <script>document.write('<script type="module" src="src/app.js?v=' + window.__EDITOR_VERSION__ + '"><\/script>');</script>
 </body>
 </html>
