@@ -8,6 +8,7 @@ import { generateNavNodes, navReport } from './model/navgen.js';
 import { buildBlockTriangles, blocksBounds } from './model/geometry.js';
 import { collect, remapIds, translate, rotateY, mirror, insert, replace, removeSelection, centreOf, toClipboardText, fromClipboardText } from './model/edit.js';
 import { writeEvmap, readEvmap } from './evmap/format.js';
+import { evmapToGlb } from './evmap/gltf.js';
 import { importEvmap } from './model/importer.js';
 import { registerAsset, getAsset, docAsset, docBounds, modelBounds } from './model/assets.js';
 import { fileKey, putFile, getFile, pruneFiles } from './editor/filestore.js';
@@ -985,6 +986,18 @@ function openExport() {
     $('#export-dialog').showModal();
 }
 
+// ------------------------------------------------------------------ export glTF
+// The map as players see it (mirrored in x like the game loads it), with materials, textures, sun
+// lights and empties for spawns, weapon spawns and teleporters. Invisible collision is left out.
+function exportGltf() {
+    let out;
+    try { out = evmapToGlb(compileDocument(state.doc), { name: state.doc.name }); }
+    catch (e) { toast(`Could not export glTF: ${e.message}`, 6000); return; }
+    download(out.bytes, `${slug(state.doc.name)}.glb`, 'model/gltf-binary');
+    const mb = out.bytes.length / (1024 * 1024);
+    toast(`Exported ${slug(state.doc.name)}.glb: ${out.stats.pieces} pieces, ${out.stats.materials} materials, ${out.stats.textures} textures (${mb >= 0.1 ? mb.toFixed(2) + ' MB' : (out.bytes.length / 1024).toFixed(1) + ' KB'})`, 5000);
+}
+
 // ------------------------------------------------------------------ export images
 // ev.io's upload form (ev.io/node/add/map) wants a 166×70 PNG thumbnail and a 2000×902 JPEG large
 // image. Both are rendered from the map itself; the thumbnail is supersampled 4× so it stays crisp.
@@ -1120,6 +1133,7 @@ function bindUi() {
     $('#btn-undo').addEventListener('click', undo);
     $('#btn-redo').addEventListener('click', redo);
     $('#btn-export').addEventListener('click', openExport);
+    $('#btn-gltf').addEventListener('click', exportGltf);
     $('#btn-images').addEventListener('click', openImages);
     $('#nav-generate').addEventListener('click', runNavGeneration);
     $('#btn-walk').addEventListener('click', startWalkTest);
